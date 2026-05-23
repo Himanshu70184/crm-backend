@@ -26,6 +26,10 @@ connectDB();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// API responses should always carry a body for frontend data fetches.
+// Disabling ETag avoids browser revalidation returning 304 without JSON.
+app.disable('etag');
+
 const corsOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
   : ['http://localhost:3000', 'http://127.0.0.1:3000'];
@@ -43,6 +47,11 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
+
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 // Static uploads
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
