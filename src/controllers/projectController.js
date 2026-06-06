@@ -54,10 +54,11 @@ exports.getProjects = async (req, res) => {
   try {
     const { status, search, page = 1, limit = 20 } = req.query;
     const query = {};
+    const isElevated = ['super_admin', 'admin'].includes(req.user.role);
 
     if (req.user.role === 'client') {
       query['client.email'] = req.user.email;
-    } else if (req.user.role !== 'admin') {
+    } else if (!isElevated) {
       query.$or = [{ owner: req.user._id }, { team: req.user._id }];
     }
     if (status) query.status = status;
@@ -80,6 +81,7 @@ exports.getProjects = async (req, res) => {
 // @GET /api/projects/:id
 exports.getProject = async (req, res) => {
   try {
+    const isElevated = ['super_admin', 'admin'].includes(req.user.role);
     const project = await Project.findById(req.params.id)
       .populate('owner', 'name email avatar')
       .populate('team', 'name email avatar role');
@@ -90,7 +92,7 @@ exports.getProject = async (req, res) => {
       if (project.client?.email !== req.user.email) {
         return res.status(403).json({ success: false, message: 'Access denied' });
       }
-    } else if (req.user.role !== 'admin') {
+    } else if (!isElevated) {
       const userId = normalizeId(req.user._id);
       const ownerId = normalizeId(project.owner);
       const teamIds = (project.team || []).map(normalizeId).filter(Boolean);

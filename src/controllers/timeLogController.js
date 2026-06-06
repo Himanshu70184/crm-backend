@@ -69,7 +69,7 @@ exports.createTimeLog = async (req, res) => {
 exports.updateTimeLog = async (req, res) => {
   try {
     const query = { _id: req.params.id };
-    if (req.user.role !== 'admin') query.user = req.user._id;
+    if (!['super_admin', 'admin'].includes(req.user.role)) query.user = req.user._id;
 
     const log = await TimeLog.findOneAndUpdate(query, req.body, { new: true })
       .populate('user', 'name email avatar')
@@ -87,7 +87,7 @@ exports.updateTimeLog = async (req, res) => {
 exports.deleteTimeLog = async (req, res) => {
   try {
     const query = { _id: req.params.id };
-    if (req.user.role !== 'admin') query.user = req.user._id;
+    if (!['super_admin', 'admin'].includes(req.user.role)) query.user = req.user._id;
 
     const log = await TimeLog.findOneAndDelete(query);
     if (!log) return res.status(404).json({ success: false, message: 'Log not found' });

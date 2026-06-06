@@ -8,12 +8,27 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true, minlength: 6, select: false },
     role: {
       type: String,
-      enum: ['admin', 'manager', 'member', 'client'],
-      default: 'member',
+      // Includes legacy values ('member', 'client') for backward compatibility
+      enum: ['super_admin', 'admin', 'hr', 'manager', 'team_lead', 'team_member', 'member', 'client'],
+      default: 'team_member',
     },
+    // Optional: additional roles for multi-role users
+    additionalRoles: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Role' }],
+    // Per-user permission overrides (takes precedence over role permissions)
+    customPermissions: { type: mongoose.Schema.Types.Mixed, default: null },
+    // Temporary permissions with expiry
+    temporaryPermissions: [
+      {
+        permissions: { type: mongoose.Schema.Types.Mixed },
+        expiresAt: { type: Date, required: true },
+        grantedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        reason: { type: String, default: '' },
+      },
+    ],
     avatar: { type: String, default: '' },
     department: { type: String, default: '' },
     phone: { type: String, default: '' },
+    shiftCode: { type: String, default: '' },
     isActive: { type: Boolean, default: true },
     lastLogin: { type: Date },
   },

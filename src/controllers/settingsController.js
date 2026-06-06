@@ -8,6 +8,8 @@ const {
   slugifyColumnId,
   getDefaultKanbanColumns,
 } = require('../utils/kanbanColumns');
+const { buildOrganizationModules } = require('../utils/organizationModules');
+const { invalidateOrganizationModulesCache } = require('../middleware/auth');
 
 const getOrCreateSettings = async () => {
   let settings = await Settings.findOne();
@@ -20,6 +22,13 @@ const publicBranding = (settings) => ({
   companyLogo: settings.companyLogo,
   branding: settings.branding,
 });
+
+const serializeSettings = (settings) => {
+  const data = settings.toObject();
+  data.organizationModules = buildOrganizationModules(data.organizationModules);
+  if (data.smtp?.pass) data.smtp.pass = '••••••••';
+  return data;
+};
 
 /** Public — no auth (login page branding) */
 exports.getPublicBranding = async (req, res) => {
@@ -34,8 +43,7 @@ exports.getPublicBranding = async (req, res) => {
 exports.getSettings = async (req, res) => {
   try {
     const settings = await getOrCreateSettings();
-    const data = settings.toObject();
-    if (data.smtp?.pass) data.smtp.pass = data.smtp.pass ? '••••••••' : '';
+    const data = serializeSettings(settings);
     res.json({ success: true, settings: data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -59,6 +67,12 @@ exports.updateSettings = async (req, res) => {
     if (body.notifications) {
       body.notifications = { ...(existing.notifications?.toObject?.() || existing.notifications || {}), ...body.notifications };
     }
+    if (body.organizationModules) {
+      body.organizationModules = buildOrganizationModules({
+        ...(existing.organizationModules?.toObject?.() || existing.organizationModules || {}),
+        ...body.organizationModules,
+      });
+    }
 
     const settings = await Settings.findByIdAndUpdate(existing._id, body, {
       new: true,
@@ -66,9 +80,9 @@ exports.updateSettings = async (req, res) => {
     });
 
     resetTransporter();
+  invalidateOrganizationModulesCache();
     await logActivity(req.user, 'Updated company settings', 'system', settings._id);
-    const data = settings.toObject();
-    if (data.smtp?.pass) data.smtp.pass = '••••••••';
+    const data = serializeSettings(settings);
     res.json({ success: true, settings: data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

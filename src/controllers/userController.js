@@ -1,4 +1,6 @@
 const User = require('../models/User');
+const PermissionAuditLog = require('../models/PermissionAuditLog');
+const { permissionsCache } = require('../middleware/auth');
 
 // @GET /api/users
 exports.getUsers = async (req, res) => {
@@ -34,11 +36,16 @@ exports.getUser = async (req, res) => {
 // @POST /api/users  (Admin creates users)
 exports.createUser = async (req, res) => {
   try {
-    const { name, email, password, role, department, phone } = req.body;
+    const { name, email, password, role, department, phone, shiftCode } = req.body;
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ success: false, message: 'Email already registered' });
 
-    const user = await User.create({ name, email, password, role, department, phone });
+    // Only super_admin can create super_admin users
+    if (role === 'super_admin' && req.user.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Only Super Admin can create Super Admin users' });
+    }
+
+    const user = await User.create({ name, email, password, role, department, phone, shiftCode });
     res.status(201).json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -48,13 +55,44 @@ exports.createUser = async (req, res) => {
 // @PUT /api/users/:id
 exports.updateUser = async (req, res) => {
   try {
-    const { name, role, department, phone, isActive } = req.body;
+    const { name, role, department, phone, isActive, customPermissions, shiftCode } = req.body;
+
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Only super_admin can change roles to/from super_admin
+    if ((role === 'super_admin' || target.role === 'super_admin') && req.user.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Only Super Admin can modify Super Admin users' });
+    }
+
+    const prevRole = target.role;
+    const updates = { name, role, department, phone, isActive, shiftCode };
+    if (customPermissions !== undefined) updates.customPermissions = customPermissions;
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      { name, role, department, phone, isActive },
+      updates,
       { new: true, runValidators: true }
     );
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Log role change
+    if (role && role !== prevRole) {
+      await PermissionAuditLog.create({
+        action: 'user_role_changed',
+        performedBy: req.user._id,
+        targetUser: user._id,
+        description: `User "${user.name}" role changed from "${prevRole}" to "${role}"`,
+        before: { role: prevRole },
+        after: { role },
+        ipAddress: req.ip || '',
+      });
+    }
+
+    // Invalidate cache if role changed
+    if (role && role !== prevRole) {
+      permissionsCache.delete(prevRole);
+    }
+
     res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -64,8 +102,14 @@ exports.updateUser = async (req, res) => {
 // @DELETE /api/users/:id
 exports.deleteUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+
+    if (target.role === 'super_admin' && req.user.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Only Super Admin can delete Super Admin users' });
+    }
+
+    await User.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: 'User deleted' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

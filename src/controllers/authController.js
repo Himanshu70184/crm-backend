@@ -1,7 +1,22 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { loadEffectivePermissions } = require('../middleware/auth');
 
 const generateToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRE });
+
+async function buildUserResponse(user) {
+  const permissions = await loadEffectivePermissions(user);
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    avatar: user.avatar,
+    department: user.department,
+    phone: user.phone,
+    permissions,
+  };
+}
 
 // @POST /api/auth/register
 exports.register = async (req, res) => {
@@ -14,12 +29,13 @@ exports.register = async (req, res) => {
     const exists = await User.findOne({ email: normalizedEmail });
     if (exists) return res.status(400).json({ success: false, message: 'Email already registered' });
 
-    // Only allow admin to assign admin role
-    const assignedRole = role && ['manager', 'member', 'client'].includes(role) ? role : 'member';
+    const allowedRoles = ['manager', 'team_member', 'member', 'client'];
+    const assignedRole = role && allowedRoles.includes(role) ? role : 'team_member';
     const user = await User.create({ name, email: normalizedEmail, password, role: assignedRole });
     const token = generateToken(user._id);
+    const userResponse = await buildUserResponse(user);
 
-    res.status(201).json({ success: true, token, user: { _id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+    res.status(201).json({ success: true, token, user: userResponse });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -44,7 +60,8 @@ exports.login = async (req, res) => {
     await user.save({ validateBeforeSave: false });
 
     const token = generateToken(user._id);
-    res.json({ success: true, token, user: { _id: user._id, name: user.name, email: user.email, role: user.role, avatar: user.avatar } });
+    const userResponse = await buildUserResponse(user);
+    res.json({ success: true, token, user: userResponse });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -52,8 +69,13 @@ exports.login = async (req, res) => {
 
 // @GET /api/auth/me
 exports.getMe = async (req, res) => {
-  const user = await User.findById(req.user._id);
-  res.json({ success: true, user });
+  try {
+    const user = await User.findById(req.user._id);
+    const userResponse = await buildUserResponse(user);
+    res.json({ success: true, user: userResponse });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 };
 
 // @PUT /api/auth/updateprofile
@@ -64,7 +86,8 @@ exports.updateProfile = async (req, res) => {
     if (req.file) updates.avatar = `/uploads/${req.file.filename}`;
 
     const user = await User.findByIdAndUpdate(req.user._id, updates, { new: true, runValidators: true });
-    res.json({ success: true, user });
+    const userResponse = await buildUserResponse(user);
+    res.json({ success: true, user: userResponse });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

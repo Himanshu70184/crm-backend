@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { ORGANIZATION_MODULES } = require('../utils/organizationModules');
 
 const brandingSchema = new mongoose.Schema(
   {
@@ -28,6 +29,67 @@ const smtpSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const attendanceShiftSchema = new mongoose.Schema(
+  {
+    code: { type: String, required: true, trim: true },
+    name: { type: String, required: true, trim: true },
+    startTime: { type: String, required: true, default: '09:30' },
+    endTime: { type: String, required: true, default: '18:30' },
+    graceMinutes: { type: Number, default: 0, min: 0 },
+    halfDayMinutes: { type: Number, default: 240, min: 1 },
+    isOvernight: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+const attendanceHolidaySchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    date: { type: Date, required: true },
+    optional: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+const attendancePolicySchema = new mongoose.Schema(
+  {
+    defaultShiftCode: { type: String, default: 'general' },
+    weeklyOffDays: {
+      type: [Number],
+      default: [0],
+      validate: {
+        validator: (days) => days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6),
+        message: 'weeklyOffDays must contain values between 0 (Sunday) and 6 (Saturday)',
+      },
+    },
+    shifts: {
+      type: [attendanceShiftSchema],
+      default: () => ([
+        {
+          code: 'general',
+          name: 'General Shift',
+          startTime: '09:30',
+          endTime: '18:30',
+          graceMinutes: 0,
+          halfDayMinutes: 240,
+          isOvernight: false,
+        },
+      ]),
+    },
+    holidays: { type: [attendanceHolidaySchema], default: [] },
+    autoMarkEnabled: { type: Boolean, default: true },
+  },
+  { _id: false }
+);
+
+const organizationModulesSchema = new mongoose.Schema(
+  ORGANIZATION_MODULES.reduce((fields, moduleDef) => {
+    fields[moduleDef.key] = { type: Boolean, default: true };
+    return fields;
+  }, {}),
+  { _id: false }
+);
+
 const settingsSchema = new mongoose.Schema(
   {
     companyName: { type: String, default: 'CRM Pro' },
@@ -49,6 +111,8 @@ const settingsSchema = new mongoose.Schema(
       slackWebhook: { type: String, default: '' },
       githubOrg: { type: String, default: '' },
     },
+    organizationModules: { type: organizationModulesSchema, default: () => ({}) },
+    attendance: { type: attendancePolicySchema, default: () => ({}) },
     kanbanColumns: {
       type: [
         {

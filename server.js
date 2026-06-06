@@ -11,15 +11,19 @@ const projectRoutes = require('./src/routes/projects');
 const taskRoutes = require('./src/routes/tasks');
 const commentRoutes = require('./src/routes/comments');
 const timeLogRoutes = require('./src/routes/timeLogs');
+const attendanceRoutes = require('./src/routes/attendance');
 const dashboardRoutes = require('./src/routes/dashboard');
 const notificationRoutes = require('./src/routes/notifications');
 const settingsRoutes = require('./src/routes/settings');
 const reportsRoutes = require('./src/routes/reports');
 const activitiesRoutes = require('./src/routes/activities');
 const setupRoutes = require('./src/routes/setup');
+const rolesRoutes = require('./src/routes/roles');
+const chatRoutes = require('./src/routes/chat');
 
 const { verifyEmailConnection } = require('./src/services/emailService');
 const { startDeadlineCron } = require('./src/jobs/deadlineReminders');
+const { startAttendanceReconcileCron } = require('./src/jobs/attendanceReconciliation');
 
 connectDB();
 
@@ -63,16 +67,19 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/comments', commentRoutes);
 app.use('/api/timelogs', timeLogRoutes);
+app.use('/api/attendance', attendanceRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/activities', activitiesRoutes);
 app.use('/api/setup', setupRoutes);
+app.use('/api/roles', rolesRoutes);
+app.use('/api/chat', chatRoutes);
 
-const { protect } = require('./src/middleware/auth');
+const { protect, enforceOrganizationModule } = require('./src/middleware/auth');
 const { getActiveTimer } = require('./src/controllers/timerController');
-app.get('/api/timer/active', protect, getActiveTimer);
+app.get('/api/timer/active', protect, enforceOrganizationModule('timeTracking'), getActiveTimer);
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -102,4 +109,5 @@ app.listen(PORT, '0.0.0.0', async () => {
   const emailStatus = await verifyEmailConnection();
   console.log(emailStatus.ok ? `✓ ${emailStatus.message}` : `⚠ Email: ${emailStatus.message}`);
   startDeadlineCron();
+  startAttendanceReconcileCron();
 });

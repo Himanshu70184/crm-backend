@@ -4,9 +4,10 @@ const {
   getProjects, getProject, createProject, updateProject,
   deleteProject, updateMilestones, getProjectStats, updateKanbanConfig,
 } = require('../controllers/projectController');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, authorize, enforceOrganizationModule } = require('../middleware/auth');
 
 router.use(protect);
+router.use(enforceOrganizationModule('projects'));
 router.get('/', getProjects);
 router.post('/', authorize('admin', 'manager'), createProject);
 router.get('/:id', getProject);

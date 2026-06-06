@@ -6,7 +6,7 @@ const User = require('../models/User');
 exports.getReports = async (req, res) => {
   try {
     const { from, to } = req.query;
-    const isAdmin = ['admin', 'manager'].includes(req.user.role);
+    const isAdmin = ['super_admin', 'admin', 'manager'].includes(req.user.role);
     if (!isAdmin) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
@@ -62,7 +62,7 @@ exports.getReports = async (req, res) => {
         timeTracking: timeByUser,
         revenue: revenue[0] || { totalBudget: 0, totalRevenue: 0 },
         completionRate: totalTasks ? Math.round((completedTasks / totalTasks) * 100) : 0,
-        teamSize: await User.countDocuments({ isActive: true, role: { $in: ['member', 'manager'] } }),
+        teamSize: await User.countDocuments({ isActive: true, role: { $in: ['team_member', 'member', 'team_lead', 'manager'] } }),
       },
     });
   } catch (err) {
@@ -80,7 +80,7 @@ exports.exportTimeReport = async (req, res) => {
       if (to) match.date.$lte = new Date(to);
     }
     if (userId) match.user = userId;
-    if (!['admin', 'manager'].includes(req.user.role)) match.user = req.user._id;
+    if (!['super_admin', 'admin', 'manager'].includes(req.user.role)) match.user = req.user._id;
 
     const logs = await TimeLog.find(match)
       .populate('user', 'name email')

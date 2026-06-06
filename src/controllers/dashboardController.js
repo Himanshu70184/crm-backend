@@ -7,7 +7,7 @@ const TimeLog = require('../models/TimeLog');
 exports.getDashboardStats = async (req, res) => {
   try {
     const userId = req.user._id;
-    const isAdmin = req.user.role === 'admin';
+    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
 
     // Project stats
     const projectQuery = isAdmin ? {} : { $or: [{ owner: userId }, { team: userId }] };

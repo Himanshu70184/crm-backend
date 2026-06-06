@@ -1,11 +1,11 @@
 const User = require('../models/User');
 
 const DEMO_USERS = [
-  { name: 'Admin User', email: 'admin@crm.com', password: 'Admin@123', role: 'admin', department: 'Management' },
-  { name: 'Sarah Manager', email: 'manager@crm.com', password: 'Manager@123', role: 'manager', department: 'Delivery' },
-  { name: 'Alex Developer', email: 'dev@crm.com', password: 'Dev@123', role: 'member', department: 'Engineering' },
-  { name: 'Jordan Designer', email: 'designer@crm.com', password: 'Dev@123', role: 'member', department: 'Design' },
-  { name: 'Acme Corp', email: 'client@crm.com', password: 'Client@123', role: 'client', department: 'Client' },
+  { name: 'Admin User', email: 'admin@crm.com', password: 'Admin@123', role: 'admin', department: 'Management', shiftCode: 'general' },
+  { name: 'Sarah Manager', email: 'manager@crm.com', password: 'Manager@123', role: 'manager', department: 'Delivery', shiftCode: 'general' },
+  { name: 'Alex Developer', email: 'dev@crm.com', password: 'Dev@123', role: 'member', department: 'Engineering', shiftCode: 'morning' },
+  { name: 'Jordan Designer', email: 'designer@crm.com', password: 'Dev@123', role: 'member', department: 'Design', shiftCode: 'evening' },
+  { name: 'Acme Corp', email: 'client@crm.com', password: 'Client@123', role: 'client', department: 'Client', shiftCode: 'general' },
 ];
 
 exports.getStatus = async (req, res) => {

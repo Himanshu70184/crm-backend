@@ -79,7 +79,7 @@ exports.updateComment = async (req, res) => {
 exports.deleteComment = async (req, res) => {
   try {
     const query = { _id: req.params.id };
-    if (req.user.role !== 'admin') query.author = req.user._id;
+    if (!['super_admin', 'admin'].includes(req.user.role)) query.author = req.user._id;
 
     const comment = await Comment.findOneAndDelete(query);
     if (!comment) return res.status(404).json({ success: false, message: 'Comment not found' });

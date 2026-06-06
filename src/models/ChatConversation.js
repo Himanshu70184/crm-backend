@@ -1,0 +1,19 @@
+const mongoose = require('mongoose');
+
+const chatConversationSchema = new mongoose.Schema(
+  {
+    title: { type: String, default: '' },
+    type: { type: String, enum: ['direct', 'group'], default: 'direct' },
+    participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }],
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
+    isArchived: { type: Boolean, default: false },
+    lastMessageAt: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+chatConversationSchema.index({ participants: 1, updatedAt: -1 });
+chatConversationSchema.index({ lastMessageAt: -1 });
+
+module.exports = mongoose.model('ChatConversation', chatConversationSchema);
