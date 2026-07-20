@@ -2,7 +2,11 @@ const mongoose = require('mongoose');
 
 const subtaskSchema = new mongoose.Schema({
   title: { type: String, required: true },
+  description: { type: String, default: '', trim: true },
   completed: { type: Boolean, default: false },
+  // Multi-assignee support (subtask-level)
+  assignees: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  // Backward compatibility (older records may still store a single assignee)
   assignee: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
 });
 
@@ -17,7 +21,12 @@ const taskSchema = new mongoose.Schema(
     },
     priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
     project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true },
+
+    // Multi-assignee support (task-level)
+    assignees: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    // Backward compatibility (older records may still store a single assignee)
     assignee: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+
     reporter: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     dueDate: { type: Date },
     estimatedHours: { type: Number, default: 0 },
@@ -41,6 +50,9 @@ const taskSchema = new mongoose.Schema(
 );
 
 taskSchema.index({ project: 1, status: 1 });
+taskSchema.index({ assignees: 1 });
+// keep old index for older data/query patterns
 taskSchema.index({ assignee: 1 });
+
 
 module.exports = mongoose.model('Task', taskSchema);

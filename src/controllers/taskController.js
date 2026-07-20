@@ -18,8 +18,17 @@ exports.getTasks = async (req, res) => {
     if (project) query.project = project;
     if (status) query.status = status;
     if (priority) query.priority = priority;
-    if (assignee) query.assignee = assignee;
+
+    // Backward compatible filter: support both assignee (single) and assignee[]-style by using $in
+    if (assignee) {
+      query.$or = [
+        { assignee: assignee },
+        { assignees: assignee },
+      ];
+    }
+
     if (search) query.title = new RegExp(search, 'i');
+
 
     // Members only see tasks in their projects
     if (req.user.role === 'member') {
@@ -40,9 +49,11 @@ exports.getTasks = async (req, res) => {
 
     const total = await Task.countDocuments(query);
     const tasks = await Task.find(query)
+      .populate('assignees', 'name email avatar')
       .populate('assignee', 'name email avatar')
       .populate('reporter', 'name email avatar')
       .populate('project', 'name')
+
       .skip((page - 1) * limit)
       .limit(Math.min(Number(limit) || 50, 500))
       .sort({ order: 1, createdAt: -1 });
@@ -57,10 +68,13 @@ exports.getTasks = async (req, res) => {
 exports.getTask = async (req, res) => {
   try {
     const task = await Task.findById(req.params.id)
+      .populate('assignees', 'name email avatar role')
       .populate('assignee', 'name email avatar role')
       .populate('reporter', 'name email avatar')
       .populate('project', 'name status')
+      .populate('subtasks.assignees', 'name email avatar')
       .populate('subtasks.assignee', 'name email avatar');
+
 
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
     res.json({ success: true, task });
@@ -73,6 +87,16 @@ exports.getTask = async (req, res) => {
 exports.createTask = async (req, res) => {
   try {
     const body = { ...req.body, reporter: req.user._id };
+
+    // Normalize assignee payloads from older clients
+    if (Object.prototype.hasOwnProperty.call(body, 'assignee') && body.assignee) {
+      // if assignees is missing, seed it from assignee
+      if (!body.assignees) body.assignees = [body.assignee];
+    }
+    if (body.assignees && !Array.isArray(body.assignees)) {
+      body.assignees = [body.assignees];
+    }
+
     if (body.status) {
       const { valid, fallback } = await validateTaskStatus(body.status);
       if (!valid) body.status = fallback;
@@ -81,9 +105,11 @@ exports.createTask = async (req, res) => {
     }
     const task = await Task.create(body);
     await task.populate([
+      { path: 'assignees', select: 'name email avatar' },
       { path: 'assignee', select: 'name email avatar' },
       { path: 'project', select: 'name' },
     ]);
+
 
     await logTaskActivity(req.user, 'Created task', task._id, {
       title: task.title,
@@ -91,9 +117,16 @@ exports.createTask = async (req, res) => {
       priority: task.priority,
     });
 
-    if (task.assignee && task.assignee._id.toString() !== req.user._id.toString()) {
+    const notifyAssignees = (task.assignees || []).filter((u) => u?._id && u._id.toString() !== req.user._id.toString());
+
+    // Backward compatibility: if only assignee is present
+    const notifyLegacy = (!notifyAssignees.length && task.assignee && task.assignee._id.toString() !== req.user._id.toString())
+      ? [task.assignee]
+      : [];
+
+    for (const assigneeUser of [...notifyAssignees, ...notifyLegacy]) {
       await notifyUser({
-        recipientId: task.assignee._id,
+        recipientId: assigneeUser._id,
         senderId: req.user._id,
         type: 'task_assigned',
         title: 'New task assigned',
@@ -103,6 +136,7 @@ exports.createTask = async (req, res) => {
         relatedProject: task.project._id,
       });
     }
+
 
     res.status(201).json({ success: true, task });
   } catch (err) {
@@ -126,7 +160,8 @@ exports.updateTask = async (req, res) => {
     const before = await Task.findById(req.params.id).populate('assignee', 'name');
     if (!before) return res.status(404).json({ success: false, message: 'Task not found' });
 
-    const allowed = ['title', 'description', 'priority', 'dueDate', 'assignee', 'estimatedHours', 'tags', 'order'];
+    const allowed = ['title', 'description', 'priority', 'dueDate', 'assignee', 'assignees', 'estimatedHours', 'tags', 'order'];
+
     const updates = {};
     for (const key of allowed) {
       if (Object.prototype.hasOwnProperty.call(req.body, key)) {
@@ -139,10 +174,25 @@ exports.updateTask = async (req, res) => {
       updates.assignee = raw && String(raw).trim() ? raw : null;
     }
 
+    // Normalize assignees payload
+    if (Object.prototype.hasOwnProperty.call(updates, 'assignees')) {
+      const raw = updates.assignees;
+      if (!raw || (Array.isArray(raw) && raw.length === 0)) {
+        updates.assignees = [];
+      } else if (Array.isArray(raw)) {
+        updates.assignees = raw.filter((id) => id && String(id).trim());
+      } else {
+        updates.assignees = [raw];
+      }
+    }
+
+
     const task = await Task.findByIdAndUpdate(req.params.id, updates, { new: true, runValidators: true })
+      .populate('assignees', 'name email avatar role')
       .populate('assignee', 'name email avatar role')
       .populate('reporter', 'name email avatar')
       .populate('project', 'name');
+
 
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
@@ -154,14 +204,32 @@ exports.updateTask = async (req, res) => {
     const afterDue = task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : '';
     if (beforeDue !== afterDue) changes.push(afterDue ? `due date → ${afterDue}` : 'due date removed');
 
-    const beforeAssigneeId = String(before.assignee?._id || before.assignee || '');
-    const afterAssigneeId = String(task.assignee?._id || task.assignee || '');
-    if (beforeAssigneeId !== afterAssigneeId) {
-      changes.push(task.assignee ? `assigned to ${task.assignee.name}` : 'unassigned');
+    const beforeAssignees = (before.assignees || []).map((u) => String(u?._id || u)).filter(Boolean);
+    const afterAssignees = (task.assignees || []).map((u) => String(u?._id || u)).filter(Boolean);
 
-      if (task.assignee && afterAssigneeId !== req.user._id.toString()) {
+    // Backward compatibility: if assignees missing, fall back to single assignee fields
+    if (!beforeAssignees.length && before.assignee) beforeAssignees.push(String(before.assignee._id || before.assignee));
+    if (!afterAssignees.length && task.assignee) afterAssignees.push(String(task.assignee._id || task.assignee));
+
+    const same = beforeAssignees.length === afterAssignees.length && beforeAssignees.every((id) => afterAssignees.includes(id));
+
+    if (!same) {
+      const added = afterAssignees.filter((id) => !beforeAssignees.includes(id));
+      const removed = beforeAssignees.filter((id) => !afterAssignees.includes(id));
+
+      if (afterAssignees.length) {
+        const firstNames = (task.assignees || []).map((u) => u?.name).filter(Boolean);
+        changes.push(`assigned to ${firstNames.slice(0, 3).join(', ')}${firstNames.length > 3 ? '…' : ''}`);
+      } else {
+        changes.push('unassigned');
+      }
+
+      for (const addedId of added) {
+        if (addedId === req.user._id.toString()) continue;
+        const u = (task.assignees || []).find((x) => String(x?._id || x) === addedId) || null;
+        if (!u) continue;
         await notifyUser({
-          recipientId: task.assignee._id,
+          recipientId: u._id,
           senderId: req.user._id,
           type: 'task_assigned',
           title: 'Task assigned to you',
@@ -171,7 +239,10 @@ exports.updateTask = async (req, res) => {
           relatedProject: task.project?._id || task.project,
         });
       }
+
+      // optionally log removed users too (kept minimal)
     }
+
 
     if (changes.length) {
       await logTaskActivity(req.user, 'Updated task', task._id, { changes: changes.join(', ') });
@@ -297,12 +368,34 @@ exports.uploadAttachment = async (req, res) => {
 // @PUT /api/tasks/:id/subtasks
 exports.updateSubtasks = async (req, res) => {
   try {
+    // Normalize subtasks to support both single and multi assignee shapes
+    const subtasks = (req.body.subtasks || []).map((s) => {
+      const next = { ...s };
+      next.title = typeof next.title === 'string' ? next.title.trim() : '';
+      next.description = typeof next.description === 'string' ? next.description.trim() : '';
+      if (!next.assignees && next.assignee) {
+        next.assignees = [next.assignee];
+      }
+      if (next.assignees && !Array.isArray(next.assignees)) {
+        next.assignees = [next.assignees];
+      }
+      next.assignees = (next.assignees || []).filter(Boolean);
+      next.assignee = next.assignees[0] || null;
+      // Keep backward-compatible single field if client sent it
+      return next;
+    }).filter((subtask) => subtask.title);
+
     const task = await Task.findByIdAndUpdate(
       req.params.id,
-      { subtasks: req.body.subtasks },
+      { subtasks: subtasks },
       { new: true }
     );
+
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
+    await task.populate([
+      { path: 'subtasks.assignees', select: 'name email avatar role' },
+      { path: 'subtasks.assignee', select: 'name email avatar role' },
+    ]);
     res.json({ success: true, subtasks: task.subtasks });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
