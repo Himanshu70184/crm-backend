@@ -25,6 +25,8 @@ const attendanceRecordSchema = new mongoose.Schema(
     isHoliday: { type: Boolean, default: false },
     holidayName: { type: String, default: '' },
     note: { type: String, default: '' },
+        clockInScreenshot: { type: String, default: '' },
+    clockOutScreenshot: { type: String, default: '' },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },

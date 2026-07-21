@@ -1,6 +1,7 @@
 const AttendanceRecord = require('../models/AttendanceRecord');
 const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
+const { saveScreenshotToDisk } = require('../services/screenshotStorageService');
 const {
   getDayBounds,
   getAttendancePolicy,
@@ -135,7 +136,7 @@ exports.getAttendanceRecords = async (req, res) => {
 // @POST /api/attendance/clock-in
 exports.clockIn = async (req, res) => {
   try {
-    const { note = '' } = req.body;
+    const { note = '', screenshot = '' } = req.body;
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
     const attendanceDate = getAttendanceDayForShift(shift, new Date());
@@ -171,6 +172,9 @@ exports.clockIn = async (req, res) => {
     record.status = lateInfo.isLate ? 'late' : 'present';
     record.updatedBy = req.user._id;
 
+    const savedInPath = saveScreenshotToDisk(screenshot, req.user._id, 'in');
+    if (savedInPath) record.clockInScreenshot = savedInPath;
+
     await record.save();
 
     const populated = await AttendanceRecord.findById(record._id)
@@ -188,7 +192,7 @@ exports.clockIn = async (req, res) => {
 // @POST /api/attendance/clock-out
 exports.clockOut = async (req, res) => {
   try {
-    const { note = '' } = req.body;
+    const { note = '', screenshot = '' } = req.body;
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
     const attendanceDate = getAttendanceDayForShift(shift, new Date());
@@ -221,6 +225,9 @@ exports.clockOut = async (req, res) => {
         ? 'late'
         : 'present';
     record.updatedBy = req.user._id;
+
+    const savedOutPath = saveScreenshotToDisk(screenshot, req.user._id, 'out');
+    if (savedOutPath) record.clockOutScreenshot = savedOutPath;
 
     await record.save();
 

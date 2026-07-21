@@ -48,8 +48,8 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 
 app.use('/api', (req, res, next) => {
