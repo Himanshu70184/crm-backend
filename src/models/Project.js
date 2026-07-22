@@ -3,9 +3,22 @@ const mongoose = require('mongoose');
 const milestoneSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, default: '' },
-  dueDate: { type: Date },
+  startDate: { type: Date },
+  endDate: { type: Date },
+  dueDate: { type: Date }, // kept for backward-compat with existing data/UI
   status: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
+  budget: { type: Number, default: 0, min: 0 },
+  taxRate: { type: Number, default: 0, min: 0 }, // percentage, e.g. 18 for 18%
 });
+
+milestoneSchema.virtual('taxAmount').get(function () {
+  return ((this.budget || 0) * (this.taxRate || 0)) / 100;
+});
+milestoneSchema.virtual('total').get(function () {
+  return (this.budget || 0) - this.get('taxAmount');
+});
+milestoneSchema.set('toJSON', { virtuals: true });
+milestoneSchema.set('toObject', { virtuals: true });
 
 const projectSchema = new mongoose.Schema(
   {

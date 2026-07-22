@@ -211,16 +211,52 @@ exports.deleteProject = async (req, res) => {
   }
 };
 
+// Cleans up milestone payloads before they hit Mongoose:
+// - empty-string dates ("") throw a CastError on a Date path, which
+//   silently fails the whole project.save() call — convert to undefined
+// - budget/taxRate coerced to numbers so stray strings don't slip through
+const sanitizeMilestones = (milestones = []) =>
+  milestones.map((m) => ({
+    ...m,
+    startDate: m.startDate ? m.startDate : undefined,
+    endDate: m.endDate ? m.endDate : undefined,
+    dueDate: m.dueDate ? m.dueDate : undefined,
+    budget: Number(m.budget) || 0,
+    taxRate: Number(m.taxRate) || 0,
+  }));
+
 // @PUT /api/projects/:id/milestones
 exports.updateMilestones = async (req, res) => {
   try {
-    const project = await Project.findByIdAndUpdate(
-      req.params.id,
-      { milestones: req.body.milestones },
-      { new: true }
-    );
+    const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
-    res.json({ success: true, milestones: project.milestones });
+
+    const nextMilestones = sanitizeMilestones(req.body.milestones);
+
+    const totalMilestoneBudget = nextMilestones.reduce((sum, m) => sum + (m.budget || 0), 0);
+    const projectBudget = project.budget || 0;
+    if (totalMilestoneBudget > projectBudget) {
+      return res.status(400).json({
+        success: false,
+        message: `Milestone budgets ($${totalMilestoneBudget.toLocaleString()}) exceed the project budget ($${projectBudget.toLocaleString()}).`,
+      });
+    }
+
+    project.milestones = nextMilestones;
+
+    // Revenue = sum of (budget - tax) for milestones marked as completed.
+    // Recomputed from scratch each time so it stays accurate even if a
+    // milestone's status or amounts are edited after being completed.
+    project.revenue = project.milestones.reduce((sum, m) => {
+      if (m.status !== 'completed') return sum;
+      const budget = m.budget || 0;
+      const tax = (budget * (m.taxRate || 0)) / 100;
+      return sum + (budget - tax);
+    }, 0);
+
+    await project.save();
+
+    res.json({ success: true, milestones: project.milestones, revenue: project.revenue });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
