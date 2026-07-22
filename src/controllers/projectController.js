@@ -52,7 +52,7 @@ const buildProjectAssignmentNotifications = ({
 // @GET /api/projects
 exports.getProjects = async (req, res) => {
   try {
-    const { status, search, page = 1, limit = 20 } = req.query;
+    const { status, search, client, page = 1, limit = 20 } = req.query;
     const query = {};
     const isElevated = ['super_admin', 'admin'].includes(req.user.role);
 
@@ -63,6 +63,7 @@ exports.getProjects = async (req, res) => {
     }
     if (status) query.status = status;
     if (search) query.name = new RegExp(search, 'i');
+    if (client) query['client.name'] = client;
 
     const total = await Project.countDocuments(query);
     const projects = await Project.find(query)
@@ -73,6 +74,26 @@ exports.getProjects = async (req, res) => {
       .sort({ createdAt: -1 });
 
     res.json({ success: true, total, page: Number(page), projects });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @GET /api/projects/clients
+// Returns distinct client names for populating the filter dropdown
+exports.getProjectClients = async (req, res) => {
+  try {
+    const isElevated = ['super_admin', 'admin'].includes(req.user.role);
+    const query = {};
+
+    if (req.user.role === 'client') {
+      query['client.email'] = req.user.email;
+    } else if (!isElevated) {
+      query.$or = [{ owner: req.user._id }, { team: req.user._id }];
+    }
+
+    const clientNames = await Project.distinct('client.name', query);
+    res.json({ success: true, clients: clientNames.filter(Boolean).sort() });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
