@@ -36,7 +36,7 @@ exports.getUser = async (req, res) => {
 // @POST /api/users  (Admin creates users)
 exports.createUser = async (req, res) => {
   try {
-    const { name, email, password, role, department, phone, shiftCode } = req.body;
+    const { name, email, password, role, department, phone, company, shiftCode } = req.body;
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ success: false, message: 'Email already registered' });
 
@@ -45,7 +45,7 @@ exports.createUser = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only Super Admin can create Super Admin users' });
     }
 
-    const user = await User.create({ name, email, password, role, department, phone, shiftCode });
+    const user = await User.create({ name, email, password, role, department, phone, company, shiftCode });
     res.status(201).json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -55,7 +55,7 @@ exports.createUser = async (req, res) => {
 // @PUT /api/users/:id
 exports.updateUser = async (req, res) => {
   try {
-    const { name, role, department, phone, isActive, customPermissions, shiftCode } = req.body;
+    const { name, role, department, phone, company, isActive, customPermissions, shiftCode } = req.body;
 
     const target = await User.findById(req.params.id);
     if (!target) return res.status(404).json({ success: false, message: 'User not found' });
@@ -66,7 +66,7 @@ exports.updateUser = async (req, res) => {
     }
 
     const prevRole = target.role;
-    const updates = { name, role, department, phone, isActive, shiftCode };
+    const updates = { name, role, department, phone, company, isActive, shiftCode };
     if (customPermissions !== undefined) updates.customPermissions = customPermissions;
 
     const user = await User.findByIdAndUpdate(

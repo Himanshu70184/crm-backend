@@ -36,6 +36,8 @@ const userSchema = new mongoose.Schema(
     avatar: { type: String, default: '' },
     department: { type: String, default: '' },
     phone: { type: String, default: '' },
+    // Client-specific field — company/organization name the client belongs to.
+    company: { type: String, default: '' },
     shiftCode: { type: String, default: '' },
     isActive: { type: Boolean, default: true },
     lastLogin: { type: Date },
