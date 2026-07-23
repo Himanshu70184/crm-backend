@@ -4,9 +4,17 @@ const User = require('../models/User');
 const Project = require('../models/Project');
 const { notifyMany } = require('../services/notificationService');
 
-function hasConversationAccess(req, conversation) {
-  if (['super_admin', 'admin'].includes(req.user.role)) return true;
+// Strict: used everywhere in the normal Chat page. Only actual participants
+// get access — admin/super_admin included, no automatic bypass.
+function isConversationMember(req, conversation) {
   return conversation.participants.some((p) => String(p) === String(req.user._id));
+}
+
+// Looser: used ONLY for message moderation (edit/delete) and the separate
+// admin oversight endpoints below. Admin/super_admin pass even if not a member.
+function hasModerationAccess(req, conversation) {
+  if (['super_admin', 'admin'].includes(req.user.role)) return true;
+  return isConversationMember(req, conversation);
 }
 
 async function disposeConversation(conversationId) {
@@ -66,12 +74,10 @@ exports.getConversations = async (req, res) => {
     await cleanupZeroMemberConversations();
 
     const { search = '' } = req.query;
-    const query = { isArchived: false };
-
-    // Users only see conversations they are in. Admin and super admin can see all.
-    if (!['super_admin', 'admin'].includes(req.user.role)) {
-      query.participants = req.user._id;
-    }
+    // Normal Chat page: everyone (including admin/super_admin) only sees
+    // conversations they are actually a participant of. Full oversight is
+    // available separately via getAllConversationsAdmin below.
+    const query = { isArchived: false, participants: req.user._id };
 
     const conversations = await ChatConversation.find(query)
       .populate('participants', 'name email role avatar department')
@@ -179,7 +185,7 @@ exports.getConversationMembers = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
 
-    if (!hasConversationAccess(req, conversation)) {
+    if (!isConversationMember(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view members' });
     }
 
@@ -205,7 +211,7 @@ exports.leaveConversation = async (req, res) => {
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!hasConversationAccess(req, conversation)) {
+    if (!isConversationMember(req, conversation)) {
       return res.status(403).json({ success: false, message: 'You are not a member of this conversation' });
     }
 
@@ -243,7 +249,7 @@ exports.getMessages = async (req, res) => {
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!hasConversationAccess(req, conversation)) {
+    if (!isConversationMember(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
@@ -253,6 +259,11 @@ exports.getMessages = async (req, res) => {
     const messages = await ChatMessage.find(query)
       .populate('sender', 'name email role avatar')
       .populate('mentions', 'name email role avatar')
+      .populate({
+        path: 'replyTo',
+        select: 'body sender attachments deletedAt',
+        populate: { path: 'sender', select: 'name' },
+      })
       .sort({ createdAt: -1 })
       .limit(Number(limit));
 
@@ -265,9 +276,21 @@ exports.getMessages = async (req, res) => {
 // POST /api/chat/conversations/:id/messages
 exports.sendMessage = async (req, res) => {
   try {
-    const { body, attachments = [], mentionIds = [] } = req.body;
-    if (!body || !String(body).trim()) {
-      return res.status(400).json({ success: false, message: 'Message body is required' });
+    const rawBody = req.body?.body;
+    const trimmedBody = rawBody ? String(rawBody).trim() : '';
+
+    // multer (chatUpload middleware) populates req.files for multipart requests.
+    // Plain JSON requests (no attachments) leave req.files undefined.
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+    const attachments = uploadedFiles.map((f) => ({
+      filename: f.filename,
+      originalname: f.originalname,
+      path: `/uploads/chat-attachments/${f.filename}`,
+      size: f.size,
+    }));
+
+    if (!trimmedBody && attachments.length === 0) {
+      return res.status(400).json({ success: false, message: 'Message body or attachment is required' });
     }
 
     const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
@@ -277,21 +300,40 @@ exports.sendMessage = async (req, res) => {
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!hasConversationAccess(req, conversation)) {
+    if (!isConversationMember(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to send in this conversation' });
     }
 
+    // mentionIds arrives as a real array for JSON requests, but as
+    // repeated `mentionIds[]` form fields for multipart requests — multer
+    // already collapses those into an array, but guard against a lone string too.
+    const rawMentionIds = req.body?.mentionIds ?? req.body?.['mentionIds[]'] ?? [];
+    const mentionIdsInput = Array.isArray(rawMentionIds) ? rawMentionIds : [rawMentionIds];
+
     const participantSet = new Set(conversation.participants.map((p) => String(p)));
-    const mentions = Array.isArray(mentionIds)
-      ? Array.from(new Set(mentionIds.map(String))).filter((id) => participantSet.has(id) && id !== String(req.user._id))
-      : [];
+    const mentions = Array.from(new Set(mentionIdsInput.map(String)))
+      .filter((id) => id && participantSet.has(id) && id !== String(req.user._id));
+
+    // Validate the reply target belongs to the same conversation (and isn't deleted)
+    // so a message can't be spoofed as replying to something from another chat.
+    let replyTo = null;
+    const replyToId = req.body?.replyToId;
+    if (replyToId) {
+      const target = await ChatMessage.findOne({
+        _id: replyToId,
+        conversation: conversation._id,
+        deletedAt: null,
+      }).select('_id');
+      if (target) replyTo = target._id;
+    }
 
     const message = await ChatMessage.create({
       conversation: conversation._id,
       sender: req.user._id,
-      body: String(body).trim(),
+      body: trimmedBody,
       attachments,
       mentions,
+      replyTo,
     });
 
     await ChatConversation.findByIdAndUpdate(conversation._id, {
@@ -301,7 +343,12 @@ exports.sendMessage = async (req, res) => {
 
     const populated = await ChatMessage.findById(message._id)
       .populate('sender', 'name email role avatar')
-      .populate('mentions', 'name email role avatar');
+      .populate('mentions', 'name email role avatar')
+      .populate({
+        path: 'replyTo',
+        select: 'body sender attachments deletedAt',
+        populate: { path: 'sender', select: 'name' },
+      });
 
     if (mentions.length) {
       await notifyMany(
@@ -339,7 +386,7 @@ exports.updateMessage = async (req, res) => {
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!conversation || !hasConversationAccess(req, conversation)) {
+    if (!conversation || !hasModerationAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed' });
     }
 
@@ -365,7 +412,12 @@ exports.updateMessage = async (req, res) => {
 
     const populated = await ChatMessage.findById(message._id)
       .populate('sender', 'name email role avatar')
-      .populate('mentions', 'name email role avatar');
+      .populate('mentions', 'name email role avatar')
+      .populate({
+        path: 'replyTo',
+        select: 'body sender attachments deletedAt',
+        populate: { path: 'sender', select: 'name' },
+      });
 
     if (newlyMentioned.length) {
       await notifyMany(
@@ -398,7 +450,7 @@ exports.deleteMessage = async (req, res) => {
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!conversation || !hasConversationAccess(req, conversation)) {
+    if (!conversation || !hasModerationAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed' });
     }
 
@@ -414,6 +466,75 @@ exports.deleteMessage = async (req, res) => {
     await message.save();
 
     res.json({ success: true, message: 'Message deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Admin oversight (separate panel only — NOT used by the normal Chat page).
+// Route these behind admin/super_admin-only middleware, e.g.:
+//   router.get('/admin/conversations', authorize('super_admin', 'admin'), chatController.getAllConversationsAdmin);
+//   router.get('/admin/conversations/:id/messages', authorize('super_admin', 'admin'), chatController.getConversationMessagesAdmin);
+// ---------------------------------------------------------------------------
+
+// GET /api/chat/admin/conversations
+exports.getAllConversationsAdmin = async (req, res) => {
+  try {
+    if (!['super_admin', 'admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+
+    await cleanupZeroMemberConversations();
+
+    const { search = '' } = req.query;
+    const conversations = await ChatConversation.find({ isArchived: false })
+      .populate('participants', 'name email role avatar department')
+      .populate('createdBy', 'name email role')
+      .sort({ lastMessageAt: -1, updatedAt: -1 })
+      .limit(500);
+
+    const validConversations = conversations.filter(
+      (c) => Array.isArray(c.participants) && c.participants.length > 0
+    );
+
+    const filtered = search.trim()
+      ? validConversations.filter((c) => {
+          const title = (c.title || '').toLowerCase();
+          const participantNames = c.participants.map((p) => p.name.toLowerCase()).join(' ');
+          return title.includes(search.toLowerCase()) || participantNames.includes(search.toLowerCase());
+        })
+      : validConversations;
+
+    res.json({ success: true, conversations: filtered });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/chat/admin/conversations/:id/messages
+exports.getConversationMessagesAdmin = async (req, res) => {
+  try {
+    if (!['super_admin', 'admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+
+    const { before, limit = 50 } = req.query;
+    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    const query = { conversation: conversation._id, deletedAt: null };
+    if (before) query.createdAt = { $lt: new Date(before) };
+
+    const messages = await ChatMessage.find(query)
+      .populate('sender', 'name email role avatar')
+      .populate('mentions', 'name email role avatar')
+      .sort({ createdAt: -1 })
+      .limit(Number(limit));
+
+    res.json({ success: true, messages: messages.reverse() });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

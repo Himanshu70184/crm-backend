@@ -4,8 +4,18 @@ const chatMessageSchema = new mongoose.Schema(
   {
     conversation: { type: mongoose.Schema.Types.ObjectId, ref: 'ChatConversation', required: true },
     sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    body: { type: String, required: true, trim: true, maxlength: 4000 },
+    body: {
+      type: String,
+      trim: true,
+      maxlength: 4000,
+      default: '',
+      // A message must have text OR at least one attachment — not both required.
+      required: function () {
+        return !(this.attachments && this.attachments.length > 0);
+      },
+    },
     mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'ChatMessage', default: null },
     attachments: [
       {
         filename: { type: String },

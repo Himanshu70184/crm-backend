@@ -68,10 +68,14 @@ async function loadEffectivePermissions(user) {
     if (rolePerms) setCachedPermissions(user.role, rolePerms);
   }
 
+  // Preset acts as the baseline/fallback for a role that has no custom
+  // permissions saved yet. Once an admin edits & saves permissions for that
+  // role via the Roles UI (rolePerms), those saved values must win — a
+  // preset existing should NOT block DB-saved overrides from applying.
   const presetFactory = ROLE_PERMISSION_PRESETS[user.role];
   let effective = presetFactory ? presetFactory() : buildDefaultPermissions();
 
-  if (!presetFactory && rolePerms) {
+  if (rolePerms) {
     effective = mergePermissions(effective, rolePerms);
   }
 
