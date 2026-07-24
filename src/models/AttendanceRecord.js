@@ -25,8 +25,36 @@ const attendanceRecordSchema = new mongoose.Schema(
     isHoliday: { type: Boolean, default: false },
     holidayName: { type: String, default: '' },
     note: { type: String, default: '' },
-        clockInScreenshot: { type: String, default: '' },
-    clockOutScreenshot: { type: String, default: '' },
+    // NOTE: `default: ''` combined with `required: true` is a Mongoose gotcha —
+    // for String paths, `required` treats an empty string as "missing", so a
+    // field that resolves to '' always fails validation even though the path
+    // is technically "set". Beyond that, screenshots only make sense when an
+    // actual clock-in/clock-out event happened — the reconciliation cron
+    // auto-creates records for absent/leave/holiday days with no clockInAt/
+    // clockOutAt at all, so requiring a screenshot unconditionally broke
+    // those saves. Both are now conditional on the matching timestamp.
+    clockInScreenshot: {
+      type: String,
+      required: [function () { return !!this.clockInAt; }, 'clockInScreenshot is required when clocked in'],
+      validate: {
+        validator: function (v) {
+          if (!this.clockInAt) return true; // no clock-in on this record — screenshot doesn't apply
+          return typeof v === 'string' && v.trim().length > 0;
+        },
+        message: 'clockInScreenshot cannot be empty when clocked in',
+      },
+    },
+    clockOutScreenshot: {
+      type: String,
+      required: [function () { return !!this.clockOutAt; }, 'clockOutScreenshot is required when clocked out'],
+      validate: {
+        validator: function (v) {
+          if (!this.clockOutAt) return true; // no clock-out on this record — screenshot doesn't apply
+          return typeof v === 'string' && v.trim().length > 0;
+        },
+        message: 'clockOutScreenshot cannot be empty when clocked out',
+      },
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
