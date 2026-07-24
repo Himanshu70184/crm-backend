@@ -20,16 +20,22 @@ const storage = multer.diskStorage({
   },
 });
 
+// Block only genuinely dangerous executable-type extensions. Everything
+// else (images, videos, PDFs, Office docs, zips, etc.) is allowed.
+const BLOCKED_EXTENSIONS = /\.(exe|bat|cmd|msi|dll|com|scr|jar|vbs|ps1|sh)$/i;
+
 const fileFilter = (req, file, cb) => {
-  if (/^(image|video)\//.test(file.mimetype)) return cb(null, true);
-  cb(new Error('Only image and video files are allowed'));
+  if (BLOCKED_EXTENSIONS.test(file.originalname || '')) {
+    return cb(new Error(`${file.originalname}: this file type is not allowed`));
+  }
+  cb(null, true);
 };
 
 const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 25 * 1024 * 1024, // 25MB per file
+    fileSize: 100 * 1024 * 1024, // 100MB per file
     files: 10,
   },
 });
@@ -40,7 +46,7 @@ function chatUpload(req, res, next) {
   upload.array('files', 10)(req, res, (err) => {
     if (err instanceof multer.MulterError) {
       const messages = {
-        LIMIT_FILE_SIZE: 'File exceeds the 25MB limit',
+        LIMIT_FILE_SIZE: 'File exceeds the 100MB limit',
         LIMIT_FILE_COUNT: 'You can attach up to 10 files at once',
       };
       return res.status(400).json({ success: false, message: messages[err.code] || err.message });

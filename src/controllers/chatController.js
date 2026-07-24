@@ -287,6 +287,7 @@ exports.sendMessage = async (req, res) => {
       originalname: f.originalname,
       path: `/uploads/chat-attachments/${f.filename}`,
       size: f.size,
+      mimetype: f.mimetype,
     }));
 
     if (!trimmedBody && attachments.length === 0) {
@@ -358,7 +359,7 @@ exports.sendMessage = async (req, res) => {
           type: 'mentioned',
           title: 'You were mentioned in chat',
           message: `${req.user.name} mentioned you in a conversation`,
-          link: `/chat?conversation=${conversation._id}`,
+          link: `/chat?conversation=${conversation._id}&message=${message._id}`,
         }))
       );
     }
@@ -427,7 +428,7 @@ exports.updateMessage = async (req, res) => {
           type: 'mentioned',
           title: 'You were mentioned in chat',
           message: `${req.user.name} mentioned you in a conversation`,
-          link: `/chat?conversation=${conversation._id}`,
+          link: `/chat?conversation=${conversation._id}&message=${message._id}`,
         }))
       );
     }

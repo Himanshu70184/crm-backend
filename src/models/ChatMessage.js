@@ -22,6 +22,7 @@ const chatMessageSchema = new mongoose.Schema(
         originalname: { type: String },
         path: { type: String },
         size: { type: Number },
+        mimetype: { type: String },
       },
     ],
     editedAt: { type: Date, default: null },
