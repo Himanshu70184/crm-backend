@@ -17,6 +17,15 @@ function hasModerationAccess(req, conversation) {
   return isConversationMember(req, conversation);
 }
 
+// Group-admin check: used for group management (add/remove members, assign admins).
+// This is intentionally separate from hasModerationAccess — org-wide admin/super_admin
+// roles do NOT automatically get group-management rights here; only users listed
+// in the conversation's own `admins` array do. This keeps group ownership meaningful
+// even for orgs where every user happens to have the 'admin' platform role.
+function isGroupAdmin(req, conversation) {
+  return (conversation.admins || []).some((a) => String(a) === String(req.user._id));
+}
+
 async function disposeConversation(conversationId) {
   await ChatMessage.deleteMany({ conversation: conversationId });
   await ChatConversation.deleteOne({ _id: conversationId });
@@ -81,6 +90,7 @@ exports.getConversations = async (req, res) => {
 
     const conversations = await ChatConversation.find(query)
       .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role')
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .limit(200);
@@ -150,6 +160,8 @@ exports.createConversation = async (req, res) => {
       title,
       type,
       participants: normalizedParticipants,
+      // Group creator becomes the first group admin. Direct chats have no admins.
+      admins: type === 'group' ? [req.user._id] : [],
       createdBy: req.user._id,
       project: projectId || null,
       lastMessageAt: new Date(),
@@ -157,6 +169,7 @@ exports.createConversation = async (req, res) => {
 
     const populated = await ChatConversation.findById(conversation._id)
       .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
 
     res.status(201).json({ success: true, conversation: populated });
@@ -170,6 +183,7 @@ exports.getConversationMembers = async (req, res) => {
   try {
     const conversation = await ChatConversation.findById(req.params.id)
       .populate('participants', 'name email role avatar department isActive')
+      .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
 
     if (conversation && await disposeConversationIfEmpty(conversation)) {
@@ -196,9 +210,177 @@ exports.getConversationMembers = async (req, res) => {
         title: conversation.title,
         type: conversation.type,
         createdBy: conversation.createdBy,
+        admins: conversation.admins,
       },
       members: conversation.participants,
     });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/chat/conversations/:id/members
+// Adds one or more users to an existing group. Only current group admins may do this.
+exports.addMembers = async (req, res) => {
+  try {
+    const { participantIds = [] } = req.body;
+    if (!Array.isArray(participantIds) || participantIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'participantIds must be a non-empty array' });
+    }
+
+    const conversation = await ChatConversation.findById(req.params.id);
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (conversation.type !== 'group') {
+      return res.status(400).json({ success: false, message: 'Members can only be added to group conversations' });
+    }
+    if (!isGroupAdmin(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Only group admins can add members' });
+    }
+
+    // Keep the same team/own-scope restriction createConversation enforces,
+    // so members can't be added around that boundary via this endpoint.
+    if (!['super_admin', 'admin'].includes(req.user.role) && req.dataScope !== 'organization') {
+      const allowedIds = await resolveTeamUserIds(req);
+      const allowed = new Set(allowedIds.map(String));
+      const invalid = participantIds.filter((id) => !allowed.has(String(id)));
+      if (invalid.length > 0) {
+        return res.status(403).json({ success: false, message: 'Some users are outside your allowed scope' });
+      }
+    }
+
+    const existingIds = new Set(conversation.participants.map((p) => String(p)));
+    const newIds = Array.from(new Set(participantIds.map(String))).filter((id) => !existingIds.has(id));
+
+    if (newIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'Selected users are already in the group' });
+    }
+
+    conversation.participants.push(...newIds);
+    await conversation.save();
+
+    const populated = await ChatConversation.findById(conversation._id)
+      .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
+      .populate('createdBy', 'name email role');
+
+    res.json({ success: true, conversation: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// DELETE /api/chat/conversations/:id/members/:userId
+// Removes a user from a group. Only current group admins may do this.
+// Cannot remove the last remaining admin without promoting someone else first.
+exports.removeMember = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const conversation = await ChatConversation.findById(req.params.id);
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (conversation.type !== 'group') {
+      return res.status(400).json({ success: false, message: 'Members can only be removed from group conversations' });
+    }
+    if (!isGroupAdmin(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Only group admins can remove members' });
+    }
+
+    const wasParticipant = conversation.participants.some((p) => String(p) === String(userId));
+    if (!wasParticipant) {
+      return res.status(400).json({ success: false, message: 'User is not a member of this group' });
+    }
+
+    const isTargetAdmin = (conversation.admins || []).some((a) => String(a) === String(userId));
+    const remainingAdmins = (conversation.admins || []).filter((a) => String(a) !== String(userId));
+    if (isTargetAdmin && remainingAdmins.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot remove the last admin. Promote another member to admin first.',
+      });
+    }
+
+    conversation.participants = conversation.participants.filter((p) => String(p) !== String(userId));
+    conversation.admins = remainingAdmins;
+
+    const disposed = await disposeConversationIfEmpty(conversation);
+    if (!disposed) {
+      await conversation.save();
+    }
+
+    if (disposed) {
+      return res.json({ success: true, message: 'Member removed. Empty chat was disposed.', disposed: true });
+    }
+
+    const populated = await ChatConversation.findById(conversation._id)
+      .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
+      .populate('createdBy', 'name email role');
+
+    res.json({ success: true, conversation: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/chat/conversations/:id/admins/:userId
+// Promotes or revokes a member's group-admin status. Only current admins may do this.
+exports.setAdmin = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { isAdmin } = req.body;
+
+    const conversation = await ChatConversation.findById(req.params.id);
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (conversation.type !== 'group') {
+      return res.status(400).json({ success: false, message: 'Admins only apply to group conversations' });
+    }
+    if (!isGroupAdmin(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Only group admins can change admin status' });
+    }
+
+    const isParticipant = conversation.participants.some((p) => String(p) === String(userId));
+    if (!isParticipant) {
+      return res.status(400).json({ success: false, message: 'User is not a member of this group' });
+    }
+
+    const currentlyAdmin = (conversation.admins || []).some((a) => String(a) === String(userId));
+
+    if (isAdmin && !currentlyAdmin) {
+      conversation.admins.push(userId);
+    } else if (!isAdmin && currentlyAdmin) {
+      const remaining = (conversation.admins || []).filter((a) => String(a) !== String(userId));
+      if (remaining.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot remove the last admin. Promote another member first.',
+        });
+      }
+      conversation.admins = remaining;
+    }
+
+    await conversation.save();
+
+    const populated = await ChatConversation.findById(conversation._id)
+      .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
+      .populate('createdBy', 'name email role');
+
+    res.json({ success: true, conversation: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -220,6 +402,14 @@ exports.leaveConversation = async (req, res) => {
 
     if (conversation.participants.length === beforeCount) {
       return res.status(400).json({ success: false, message: 'You are not a participant in this conversation' });
+    }
+
+    // If the person leaving was the last admin, promote the earliest-added
+    // remaining participant so the group is never left admin-less.
+    const wasAdmin = (conversation.admins || []).some((a) => String(a) === String(req.user._id));
+    conversation.admins = (conversation.admins || []).filter((a) => String(a) !== String(req.user._id));
+    if (wasAdmin && conversation.admins.length === 0 && conversation.participants.length > 0) {
+      conversation.admins = [conversation.participants[0]];
     }
 
     const disposed = await disposeConversationIfEmpty(conversation);
@@ -491,6 +681,7 @@ exports.getAllConversationsAdmin = async (req, res) => {
     const { search = '' } = req.query;
     const conversations = await ChatConversation.find({ isArchived: false })
       .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role')
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .limit(500);

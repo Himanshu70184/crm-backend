@@ -53,7 +53,7 @@ async function buildSummary(query, todayRecord) {
         halfDayCount: { $sum: { $cond: [{ $eq: ['$isHalfDay', true] }, 1, 0] } },
         absentCount: { $sum: { $cond: [{ $eq: ['$isAbsent', true] }, 1, 0] } },
         leaveCount: { $sum: { $cond: [{ $eq: ['$isOnLeave', true] }, 1, 0] } },
-        holidayCount: { $sum: { $cond: [{ $eq: ['$isHoliday', true] }, 1, 0] } },
+        // holidayCount is computed from the policy (unique holidays in range), not here
         remoteCount: { $sum: { $cond: [{ $eq: ['$status', 'remote'] }, 1, 0] } },
         totalMinutes: { $sum: '$workMinutes' },
       },
@@ -126,6 +126,18 @@ exports.getAttendanceRecords = async (req, res) => {
         .limit(Number(limit)),
       buildSummary(query, todayRecord),
     ]);
+
+    // Compute holidayCount from the policy (unique holidays in range),
+    // not from attendance records (which creates one record per user per
+    // holiday, causing the count to multiply when all users are selected).
+    const policy = await getAttendancePolicy();
+    const rangeStartMs = rangeStart.getTime();
+    const rangeEndMs = rangeEnd.getTime();
+    const holidaysInRange = (policy.holidays || []).filter((h) => {
+      const hMs = new Date(h.date).getTime();
+      return hMs >= rangeStartMs && hMs <= rangeEndMs;
+    });
+    summary.holidayCount = holidaysInRange.length;
 
     res.json({ success: true, records, summary, total: records.length });
   } catch (err) {

@@ -5,6 +5,10 @@ const chatConversationSchema = new mongoose.Schema(
     title: { type: String, default: '' },
     type: { type: String, enum: ['direct', 'group'], default: 'direct' },
     participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }],
+    // Group-level admins. Only meaningful when type === 'group'.
+    // The creator is added here automatically when a group is created.
+    // Admins can add/remove members and promote/revoke other admins.
+    admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
     isArchived: { type: Boolean, default: false },
