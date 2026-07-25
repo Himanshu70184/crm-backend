@@ -13,6 +13,8 @@ const {
   sendMessage,
   updateMessage,
   deleteMessage,
+  pinMessage,
+  unpinMessage,
 } = require('../controllers/chatController');
 
 const { protect, checkPermission, enforceOrganizationModule } = require('../middleware/auth');
@@ -34,5 +36,7 @@ router.get('/conversations/:id/messages', checkPermission('chat', 'read'), getMe
 router.post('/conversations/:id/messages', checkPermission('chat', 'create'), chatUpload, sendMessage);
 router.put('/messages/:messageId', checkPermission('chat', 'update'), updateMessage);
 router.delete('/messages/:messageId', checkPermission('chat', 'delete'), deleteMessage);
+router.post('/messages/:messageId/pin', checkPermission('chat', 'update'), pinMessage);
+router.post('/messages/:messageId/unpin', checkPermission('chat', 'update'), unpinMessage);
 
 module.exports = router;

@@ -92,6 +92,7 @@ exports.getConversations = async (req, res) => {
       .populate('participants', 'name email role avatar department')
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role')
+      .populate({ path: 'pinnedMessage', select: 'body sender attachments', populate: { path: 'sender', select: 'name' } })
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .limit(200);
 
@@ -657,6 +658,70 @@ exports.deleteMessage = async (req, res) => {
     await message.save();
 
     res.json({ success: true, message: 'Message deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/chat/messages/:messageId/pin
+// Pins a message in a conversation. For group chats the pin is stored on the
+// conversation (everyone-scope). For direct chats the pin is self-scope (managed
+// client-side), so this endpoint is only meaningful for group conversations.
+exports.pinMessage = async (req, res) => {
+  try {
+    const { scope = 'everyone' } = req.body;
+
+    const message = await ChatMessage.findById(req.params.messageId);
+    if (!message || message.deletedAt) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+
+    const conversation = await ChatConversation.findById(message.conversation);
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not a member of this conversation' });
+    }
+
+    // For 'everyone' scope (group chats), store the pin on the conversation.
+    // For 'self' scope (direct chats), pin is managed client-side.
+    if (scope === 'everyone') {
+      conversation.pinnedMessage = message._id;
+      await conversation.save();
+    }
+
+    res.json({ success: true, message: 'Message pinned' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/chat/messages/:messageId/unpin
+// Unpins a message in a conversation.
+exports.unpinMessage = async (req, res) => {
+  try {
+    const { scope = 'everyone' } = req.body;
+
+    const message = await ChatMessage.findById(req.params.messageId);
+    if (!message || message.deletedAt) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+
+    const conversation = await ChatConversation.findById(message.conversation);
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not a member of this conversation' });
+    }
+
+    if (scope === 'everyone') {
+      conversation.pinnedMessage = null;
+      await conversation.save();
+    }
+
+    res.json({ success: true, message: 'Message unpinned' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
