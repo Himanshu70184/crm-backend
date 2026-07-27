@@ -36,6 +36,9 @@ exports.normalizeKanbanColumns = (columns) => {
 exports.getKanbanColumnsFromSettings = (settings) =>
   exports.normalizeKanbanColumns(settings?.kanbanColumns);
 
+exports.getKanbanColumnsFromProject = (project) =>
+  exports.normalizeKanbanColumns(project?.kanbanConfig?.columns);
+
 exports.isValidColumnId = (columns, status) => columns.some((c) => c.id === status);
 
 module.exports.DEFAULT_KANBAN_COLUMNS = DEFAULT_KANBAN_COLUMNS;

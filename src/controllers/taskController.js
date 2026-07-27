@@ -4,8 +4,8 @@ const { notifyUser } = require('../services/notificationService');
 const { validateTaskStatus, getWipLimit, getCompletedColumnIds, getActiveColumns } = require('../services/kanbanService');
 const { logTaskActivity, getTaskActivities } = require('../services/taskActivityService');
 
-const phaseLabel = async (statusId) => {
-  const cols = await getActiveColumns();
+const phaseLabel = async (statusId, projectId = null) => {
+  const cols = await getActiveColumns(projectId);
   return cols.find((c) => c.id === statusId)?.label || statusId;
 };
 
@@ -97,11 +97,14 @@ exports.createTask = async (req, res) => {
       body.assignees = [body.assignees];
     }
 
+    const projectId = body.project;
+    const activeColumns = await getActiveColumns(projectId);
+    const fallback = activeColumns[0]?.id || 'todo';
     if (body.status) {
-      const { valid, fallback } = await validateTaskStatus(body.status);
+      const { valid } = await validateTaskStatus(body.status, projectId);
       if (!valid) body.status = fallback;
     } else {
-      body.status = 'todo';
+      body.status = fallback;
     }
     const task = await Task.create(body);
     await task.populate([
@@ -265,7 +268,7 @@ exports.updateTaskStatus = async (req, res) => {
     const existing = await Task.findById(req.params.id);
     if (!existing) return res.status(404).json({ success: false, message: 'Task not found' });
 
-    const { valid, columns } = await validateTaskStatus(status);
+    const { valid, columns } = await validateTaskStatus(status, existing.project);
     if (!valid) {
       return res.status(400).json({
         success: false,
@@ -273,7 +276,7 @@ exports.updateTaskStatus = async (req, res) => {
       });
     }
 
-    const wipLimit = await getWipLimit(status);
+    const wipLimit = await getWipLimit(status, existing.project);
     if (wipLimit != null && existing.status !== status) {
       const countInColumn = await Task.countDocuments({
         project: existing.project,
@@ -298,8 +301,8 @@ exports.updateTaskStatus = async (req, res) => {
 
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
-    const fromLabel = await phaseLabel(existing.status);
-    const toLabel = await phaseLabel(status);
+    const fromLabel = await phaseLabel(existing.status, existing.project);
+    const toLabel = await phaseLabel(status, existing.project);
     await logTaskActivity(req.user, 'Moved task', task._id, {
       from: existing.status,
       to: status,
@@ -310,7 +313,7 @@ exports.updateTaskStatus = async (req, res) => {
     const projectId = task.project?._id || task.project || existing.project;
     if (projectId) {
       try {
-        const completedIds = await getCompletedColumnIds();
+        const completedIds = await getCompletedColumnIds(projectId);
         const allTasks = await Task.find({ project: projectId });
         const completed = allTasks.filter((t) => completedIds.includes(t.status)).length;
         const progress = allTasks.length ? Math.round((completed / allTasks.length) * 100) : 0;

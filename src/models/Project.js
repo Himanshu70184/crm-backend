@@ -20,6 +20,17 @@ milestoneSchema.virtual('total').get(function () {
 milestoneSchema.set('toJSON', { virtuals: true });
 milestoneSchema.set('toObject', { virtuals: true });
 
+const kanbanColumnSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    label: { type: String, required: true },
+    color: { type: String, default: 'slate' },
+    order: { type: Number, default: 0 },
+    wipLimit: { type: Number, default: null },
+  },
+  { _id: false }
+);
+
 const projectSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -45,6 +56,10 @@ const projectSchema = new mongoose.Schema(
     budget: { type: Number, default: 0 },
     revenue: { type: Number, default: 0 },
     kanbanConfig: {
+      columns: {
+        type: [kanbanColumnSchema],
+        default: undefined,
+      },
       wipLimits: {
         todo: { type: Number, default: null },
         in_progress: { type: Number, default: 5 },

@@ -1,6 +1,7 @@
 const Project = require('../models/Project');
 const Task = require('../models/Task');
 const { notifyMany } = require('../services/notificationService');
+const { normalizeKanbanColumns, slugifyColumnId, getKanbanColumnsFromProject } = require('../utils/kanbanColumns');
 
 const normalizeId = (value) => {
   if (!value) return '';
@@ -265,13 +266,46 @@ exports.updateMilestones = async (req, res) => {
 // @PUT /api/projects/:id/kanban
 exports.updateKanbanConfig = async (req, res) => {
   try {
-    const project = await Project.findByIdAndUpdate(
-      req.params.id,
-      { kanbanConfig: req.body.kanbanConfig },
-      { new: true }
-    );
+    const project = await Project.findById(req.params.id);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
-    res.json({ success: true, kanbanConfig: project.kanbanConfig });
+
+    const rawColumns = req.body?.columns || req.body?.kanbanConfig?.columns;
+    if (!Array.isArray(rawColumns) || rawColumns.length < 1) {
+      return res.status(400).json({ success: false, message: 'At least one Kanban phase is required' });
+    }
+
+    const ids = new Set();
+    for (const col of rawColumns) {
+      const id = (col.id || slugifyColumnId(col.label)).trim();
+      if (ids.has(id)) {
+        return res.status(400).json({ success: false, message: `Duplicate phase id: ${id}` });
+      }
+      ids.add(id);
+      col.id = id;
+    }
+
+    const normalized = normalizeKanbanColumns(rawColumns);
+    const oldColumns = getKanbanColumnsFromProject(project);
+    const removedIds = oldColumns.map((c) => c.id).filter((id) => !normalized.some((n) => n.id === id));
+    const fallbackId = normalized[0].id;
+
+    if (removedIds.length) {
+      await Task.updateMany(
+        { project: project._id, status: { $in: removedIds } },
+        { $set: { status: fallbackId } }
+      );
+    }
+
+    project.kanbanConfig = {
+      ...(project.kanbanConfig?.toObject?.() || project.kanbanConfig || {}),
+      ...(req.body.kanbanConfig || {}),
+      columns: normalized,
+    };
+
+    await project.save();
+    require('../services/kanbanService').clearColumnCache(project._id);
+
+    res.json({ success: true, kanbanConfig: project.kanbanConfig, columns: normalized });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
