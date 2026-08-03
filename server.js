@@ -3,7 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const path = require('path');
+const http = require('http');
 const connectDB = require('./src/config/db');
+const { initializeChatSocket } = require('./src/socket/chatSocket');
 
 const authRoutes = require('./src/routes/auth');
 const userRoutes = require('./src/routes/users');
@@ -29,6 +31,7 @@ connectDB();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const server = http.createServer(app);
 
 // API responses should always carry a body for frontend data fetches.
 // Disabling ETag avoids browser revalidation returning 304 without JSON.
@@ -48,6 +51,9 @@ app.use(
     credentials: true,
   })
 );
+
+initializeChatSocket(server, corsOrigins);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
@@ -104,7 +110,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', async () => {
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`Server running on http://127.0.0.1:${PORT}`);
   const emailStatus = await verifyEmailConnection();
   console.log(emailStatus.ok ? `✓ ${emailStatus.message}` : `⚠ Email: ${emailStatus.message}`);

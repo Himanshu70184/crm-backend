@@ -3,6 +3,7 @@ const ChatMessage = require('../models/ChatMessage');
 const User = require('../models/User');
 const Project = require('../models/Project');
 const { notifyMany } = require('../services/notificationService');
+const { emitConversationEvent, emitUsersEvent } = require('../socket/chatSocket');
 
 // Strict: used everywhere in the normal Chat page. Only actual participants
 // get access — admin/super_admin included, no automatic bypass.
@@ -45,6 +46,10 @@ async function cleanupZeroMemberConversations() {
   await ChatMessage.deleteMany({ conversation: { $in: ids } });
   await ChatConversation.deleteMany({ _id: { $in: ids } });
   return ids.length;
+}
+
+function toIdArray(values = []) {
+  return values.map((v) => String(v?._id || v)).filter(Boolean);
 }
 
 async function resolveTeamUserIds(req) {
@@ -173,6 +178,12 @@ exports.createConversation = async (req, res) => {
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
 
+    emitUsersEvent(
+      toIdArray(populated?.participants || normalizedParticipants),
+      'chat:conversation-updated',
+      { conversationId: String(conversation._id), reason: 'conversation_created' }
+    );
+
     res.status(201).json({ success: true, conversation: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -269,6 +280,12 @@ exports.addMembers = async (req, res) => {
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
 
+    emitUsersEvent(toIdArray(populated.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'members_added',
+    });
+    emitConversationEvent(conversation._id, 'chat:conversation-updated', { reason: 'members_added' });
+
     res.json({ success: true, conversation: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -296,6 +313,8 @@ exports.removeMember = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only group admins can remove members' });
     }
 
+    const participantIdsBefore = toIdArray(conversation.participants);
+
     const wasParticipant = conversation.participants.some((p) => String(p) === String(userId));
     if (!wasParticipant) {
       return res.status(400).json({ success: false, message: 'User is not a member of this group' });
@@ -319,6 +338,10 @@ exports.removeMember = async (req, res) => {
     }
 
     if (disposed) {
+      emitUsersEvent(participantIdsBefore, 'chat:conversation-updated', {
+        conversationId: String(conversation._id),
+        reason: 'conversation_disposed',
+      });
       return res.json({ success: true, message: 'Member removed. Empty chat was disposed.', disposed: true });
     }
 
@@ -326,6 +349,13 @@ exports.removeMember = async (req, res) => {
       .populate('participants', 'name email role avatar department')
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
+
+    emitUsersEvent(
+      Array.from(new Set([...participantIdsBefore, ...toIdArray(populated.participants), String(userId)])),
+      'chat:conversation-updated',
+      { conversationId: String(conversation._id), reason: 'member_removed' }
+    );
+    emitConversationEvent(conversation._id, 'chat:conversation-updated', { reason: 'member_removed' });
 
     res.json({ success: true, conversation: populated });
   } catch (err) {
@@ -381,6 +411,12 @@ exports.setAdmin = async (req, res) => {
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role');
 
+    emitUsersEvent(toIdArray(populated.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'admins_updated',
+    });
+    emitConversationEvent(conversation._id, 'chat:conversation-updated', { reason: 'admins_updated' });
+
     res.json({ success: true, conversation: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -397,6 +433,8 @@ exports.leaveConversation = async (req, res) => {
     if (!isConversationMember(req, conversation)) {
       return res.status(403).json({ success: false, message: 'You are not a member of this conversation' });
     }
+
+    const participantIdsBefore = toIdArray(conversation.participants);
 
     const beforeCount = conversation.participants.length;
     conversation.participants = conversation.participants.filter((p) => String(p) !== String(req.user._id));
@@ -416,6 +454,20 @@ exports.leaveConversation = async (req, res) => {
     const disposed = await disposeConversationIfEmpty(conversation);
     if (!disposed) {
       await conversation.save();
+    }
+
+    if (disposed) {
+      emitUsersEvent(participantIdsBefore, 'chat:conversation-updated', {
+        conversationId: String(conversation._id),
+        reason: 'conversation_disposed',
+      });
+    } else {
+      emitUsersEvent(
+        Array.from(new Set([...participantIdsBefore, ...toIdArray(conversation.participants)])),
+        'chat:conversation-updated',
+        { conversationId: String(conversation._id), reason: 'member_left' }
+      );
+      emitConversationEvent(conversation._id, 'chat:conversation-updated', { reason: 'member_left' });
     }
 
     res.json({
@@ -555,6 +607,14 @@ exports.sendMessage = async (req, res) => {
       );
     }
 
+    emitConversationEvent(conversation._id, 'chat:message-created', {
+      messageId: String(populated._id),
+    });
+    emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'message_created',
+    });
+
     res.status(201).json({ success: true, message: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -624,6 +684,14 @@ exports.updateMessage = async (req, res) => {
       );
     }
 
+    emitConversationEvent(conversation._id, 'chat:message-updated', {
+      messageId: String(populated._id),
+    });
+    emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'message_updated',
+    });
+
     res.json({ success: true, message: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -657,6 +725,14 @@ exports.deleteMessage = async (req, res) => {
     message.deletedAt = new Date();
     await message.save();
 
+    emitConversationEvent(conversation._id, 'chat:message-deleted', {
+      messageId: String(message._id),
+    });
+    emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'message_deleted',
+    });
+
     res.json({ success: true, message: 'Message deleted' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -689,6 +765,14 @@ exports.pinMessage = async (req, res) => {
     if (scope === 'everyone') {
       conversation.pinnedMessage = message._id;
       await conversation.save();
+
+      emitConversationEvent(conversation._id, 'chat:pin-updated', {
+        pinnedMessageId: String(message._id),
+      });
+      emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
+        conversationId: String(conversation._id),
+        reason: 'pin_updated',
+      });
     }
 
     res.json({ success: true, message: 'Message pinned' });
@@ -719,6 +803,14 @@ exports.unpinMessage = async (req, res) => {
     if (scope === 'everyone') {
       conversation.pinnedMessage = null;
       await conversation.save();
+
+      emitConversationEvent(conversation._id, 'chat:pin-updated', {
+        pinnedMessageId: null,
+      });
+      emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
+        conversationId: String(conversation._id),
+        reason: 'pin_updated',
+      });
     }
 
     res.json({ success: true, message: 'Message unpinned' });
