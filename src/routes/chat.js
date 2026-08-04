@@ -11,6 +11,7 @@ const {
   leaveConversation,
   getMessages,
   getMessageCount,
+  updateConversation,
   sendMessage,
   updateMessage,
   deleteMessage,
@@ -19,13 +20,15 @@ const {
 } = require('../controllers/chatController');
 
 const { protect, checkPermission, enforceOrganizationModule } = require('../middleware/auth');
+const upload = require('../middleware/upload');
 const chatUpload = require('../middleware/chatUpload');
 
 router.use(protect);
 router.use(enforceOrganizationModule('chat'));
 
 router.get('/conversations', checkPermission('chat', 'read'), getConversations);
-router.post('/conversations', checkPermission('chat', 'create'), createConversation);
+router.post('/conversations', checkPermission('chat', 'create'), upload.single('avatar'), createConversation);
+router.put('/conversations/:id', checkPermission('chat', 'update'), upload.single('avatar'), updateConversation);
 router.get('/conversations/:id/members', checkPermission('chat', 'read'), getConversationMembers);
 router.post('/conversations/:id/members', checkPermission('chat', 'update'), addMembers);
 router.delete('/conversations/:id/members/:userId', checkPermission('chat', 'update'), removeMember);

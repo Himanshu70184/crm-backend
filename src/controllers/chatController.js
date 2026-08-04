@@ -248,7 +248,7 @@ exports.createConversation = async (req, res) => {
       if (existing) return res.status(200).json({ success: true, conversation: existing, reused: true });
     }
 
-    const conversation = await ChatConversation.create({
+    const conversationData = {
       title,
       type,
       participants: normalizedParticipants,
@@ -257,7 +257,12 @@ exports.createConversation = async (req, res) => {
       createdBy: req.user._id,
       project: projectId || null,
       lastMessageAt: new Date(),
-    });
+    };
+    if (req.file) {
+      conversationData.avatar = `/uploads/${req.file.filename}`;
+    }
+
+    const conversation = await ChatConversation.create(conversationData);
 
     const populated = await ChatConversation.findById(conversation._id)
       .populate('participants', 'name email role avatar department')
@@ -271,6 +276,55 @@ exports.createConversation = async (req, res) => {
     );
 
     res.status(201).json({ success: true, conversation: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// PUT /api/chat/conversations/:id
+exports.updateConversation = async (req, res) => {
+  try {
+    const { title = '', projectId = null } = req.body;
+    const conversation = await ChatConversation.findById(req.params.id);
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    if (conversation.type === 'group') {
+      if (!isGroupAdmin(req, conversation)) {
+        return res.status(403).json({ success: false, message: 'Only group admins can update this group' });
+      }
+    } else if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not allowed to update this conversation' });
+    }
+
+    if (title && String(title).trim().length > 0) {
+      conversation.title = String(title).trim();
+    }
+    if (projectId !== null) {
+      conversation.project = projectId || null;
+    }
+    if (req.file) {
+      conversation.avatar = `/uploads/${req.file.filename}`;
+    }
+
+    await conversation.save();
+
+    const populated = await ChatConversation.findById(conversation._id)
+      .populate('participants', 'name email role avatar department')
+      .populate('admins', 'name email role avatar')
+      .populate('createdBy', 'name email role');
+
+    emitUsersEvent(toIdArray(populated.participants), 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'conversation_updated',
+    });
+    emitConversationEvent(conversation._id, 'chat:conversation-updated', { reason: 'conversation_updated' });
+
+    res.json({ success: true, conversation: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -616,7 +670,11 @@ exports.getMessageCount = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
-    const count = await ChatMessage.countDocuments({ conversation: conversation._id, deletedAt: null });
+    const query = { conversation: conversation._id, deletedAt: null };
+    if (req.query.since) {
+      query.createdAt = { $gt: new Date(req.query.since) };
+    }
+    const count = await ChatMessage.countDocuments(query);
     res.json({ success: true, count });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

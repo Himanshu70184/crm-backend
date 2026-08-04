@@ -45,7 +45,10 @@ exports.createUser = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only Super Admin can create Super Admin users' });
     }
 
-    const user = await User.create({ name, email, password, role, department, phone, company, shiftCode });
+    const createData = { name, email, password, role, department, phone, company, shiftCode };
+    if (req.file) createData.avatar = `/uploads/${req.file.filename}`;
+
+    const user = await User.create(createData);
     res.status(201).json({ success: true, user });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -68,6 +71,7 @@ exports.updateUser = async (req, res) => {
     const prevRole = target.role;
     const updates = { name, role, department, phone, company, isActive, shiftCode };
     if (customPermissions !== undefined) updates.customPermissions = customPermissions;
+    if (req.file) updates.avatar = `/uploads/${req.file.filename}`;
 
     const user = await User.findByIdAndUpdate(
       req.params.id,

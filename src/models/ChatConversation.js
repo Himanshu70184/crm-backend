@@ -11,6 +11,7 @@ const chatConversationSchema = new mongoose.Schema(
     admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
+    avatar: { type: String, default: '' },
     isArchived: { type: Boolean, default: false },
     lastMessageAt: { type: Date, default: Date.now },
     // The currently pinned message for this conversation (group-wide/everyone scope).
