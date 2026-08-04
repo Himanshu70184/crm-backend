@@ -602,6 +602,27 @@ exports.getMessages = async (req, res) => {
   }
 };
 
+// GET /api/chat/conversations/:id/messages/count
+exports.getMessageCount = async (req, res) => {
+  try {
+    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
+    }
+
+    const count = await ChatMessage.countDocuments({ conversation: conversation._id, deletedAt: null });
+    res.json({ success: true, count });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // POST /api/chat/conversations/:id/messages
 exports.sendMessage = async (req, res) => {
   try {
