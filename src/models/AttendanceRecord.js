@@ -25,14 +25,6 @@ const attendanceRecordSchema = new mongoose.Schema(
     isHoliday: { type: Boolean, default: false },
     holidayName: { type: String, default: '' },
     note: { type: String, default: '' },
-    // NOTE: `default: ''` combined with `required: true` is a Mongoose gotcha —
-    // for String paths, `required` treats an empty string as "missing", so a
-    // field that resolves to '' always fails validation even though the path
-    // is technically "set". Beyond that, screenshots only make sense when an
-    // actual clock-in/clock-out event happened — the reconciliation cron
-    // auto-creates records for absent/leave/holiday days with no clockInAt/
-    // clockOutAt at all, so requiring a screenshot unconditionally broke
-    // those saves. Both are now conditional on the matching timestamp.
     clockInScreenshot: {
       type: String,
       required: [function () { return !!this.clockInAt; }, 'clockInScreenshot is required when clocked in'],

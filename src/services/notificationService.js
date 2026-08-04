@@ -2,6 +2,7 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const Settings = require('../models/Settings');
 const { sendEmail } = require('./emailService');
+const { emitUsersEvent } = require('../socket/chatSocket');
 
 const frontendUrl = () => process.env.FRONTEND_URL || 'http://localhost:3000';
 
@@ -61,6 +62,12 @@ exports.notifyUser = async ({
     link,
     relatedTask,
     relatedProject,
+  });
+
+  const unreadCount = await Notification.countDocuments({ recipient: recipientId, read: false });
+  emitUsersEvent([recipientId], 'notification:created', {
+    notificationId: String(notification._id),
+    unreadCount,
   });
 
   if (recipientId.toString() === senderId?.toString()) return notification;

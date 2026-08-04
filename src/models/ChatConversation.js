@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const chatConversationSchema = new mongoose.Schema(
   {
     title: { type: String, default: '' },
-    type: { type: String, enum: ['direct', 'group'], default: 'direct' },
+    type: { type: String, enum: ['direct', 'group', 'self'], default: 'direct' },
     participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }],
     // Group-level admins. Only meaningful when type === 'group'.
     // The creator is added here automatically when a group is created.

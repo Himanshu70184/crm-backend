@@ -34,13 +34,17 @@ async function disposeConversation(conversationId) {
 
 async function disposeConversationIfEmpty(conversation) {
   if (!conversation) return false;
+  // Self-chats (Note to Self) should never be auto-disposed even if participants
+  // list is empty — they persist until the user explicitly clears them.
+  if (conversation.type === 'self') return false;
   if ((conversation.participants || []).length > 0) return false;
   await disposeConversation(conversation._id);
   return true;
 }
 
 async function cleanupZeroMemberConversations() {
-  const empties = await ChatConversation.find({ participants: { $size: 0 } }).select('_id');
+  // Skip self-type conversations — they are intentionally single-participant
+  const empties = await ChatConversation.find({ participants: { $size: 0 }, type: { $ne: 'self' } }).select('_id');
   if (!empties.length) return 0;
   const ids = empties.map((item) => item._id);
   await ChatMessage.deleteMany({ conversation: { $in: ids } });
@@ -50,6 +54,56 @@ async function cleanupZeroMemberConversations() {
 
 function toIdArray(values = []) {
   return values.map((v) => String(v?._id || v)).filter(Boolean);
+}
+
+// Attaches the latest non-deleted message preview to each conversation.
+// Uses a single aggregation (no N+1 queries) so the sidebar can show the
+// last message body + sender name without an extra request per chat.
+async function attachLastMessages(conversations) {
+  if (!Array.isArray(conversations) || conversations.length === 0) return conversations;
+  const ids = conversations.map((c) => c._id);
+
+  const lastMessages = await ChatMessage.aggregate([
+    { $match: { conversation: { $in: ids }, deletedAt: null } },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: '$conversation',
+        body: { $first: '$body' },
+        attachments: { $first: '$attachments' },
+        sender: { $first: '$sender' },
+      },
+    },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'sender',
+        foreignField: '_id',
+        as: 'senderDoc',
+      },
+    },
+    { $unwind: { path: '$senderDoc', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        body: 1,
+        attachments: 1,
+        senderName: { $ifNull: ['$senderDoc.name', ''] },
+      },
+    },
+  ]);
+
+  const map = new Map(lastMessages.map((m) => [String(m._id), m]));
+  conversations.forEach((c) => {
+    const lm = map.get(String(c._id));
+    c.lastMessage = lm
+      ? {
+          body: lm.body || '',
+          attachments: lm.attachments || [],
+          senderName: lm.senderName || '',
+        }
+      : null;
+  });
+  return conversations;
 }
 
 async function resolveTeamUserIds(req) {
@@ -123,6 +177,8 @@ exports.getConversations = async (req, res) => {
         })
       : validConversations;
 
+    await attachLastMessages(filtered);
+
     res.json({ success: true, conversations: filtered });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -133,6 +189,36 @@ exports.getConversations = async (req, res) => {
 exports.createConversation = async (req, res) => {
   try {
     const { title = '', participantIds = [], type = 'group', projectId = null } = req.body;
+
+    // Handle self-chat (Note to Self) — special case with only the current user
+    if (type === 'self') {
+      // Check if user already has a self-chat, reuse it
+      const existing = await ChatConversation.findOne({
+        type: 'self',
+        participants: { $size: 1, $elemMatch: { $eq: req.user._id } },
+        isArchived: false,
+      }).populate('participants', 'name email role avatar department');
+      if (existing) {
+        return res.status(200).json({ success: true, conversation: existing, reused: true });
+      }
+
+      const conversation = await ChatConversation.create({
+        title: title || '📝 Note to Self',
+        type: 'self',
+        participants: [req.user._id],
+        admins: [],
+        createdBy: req.user._id,
+        project: null,
+        lastMessageAt: new Date(),
+      });
+
+      const populated = await ChatConversation.findById(conversation._id)
+        .populate('participants', 'name email role avatar department')
+        .populate('admins', 'name email role avatar')
+        .populate('createdBy', 'name email role');
+
+      return res.status(201).json({ success: true, conversation: populated });
+    }
 
     if (!Array.isArray(participantIds) || participantIds.length === 0) {
       return res.status(400).json({ success: false, message: 'participantIds must be a non-empty array' });
@@ -608,7 +694,8 @@ exports.sendMessage = async (req, res) => {
     }
 
     emitConversationEvent(conversation._id, 'chat:message-created', {
-      messageId: String(populated._id),
+      conversationId: String(conversation._id),
+      message: populated,
     });
     emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
       conversationId: String(conversation._id),
@@ -685,7 +772,8 @@ exports.updateMessage = async (req, res) => {
     }
 
     emitConversationEvent(conversation._id, 'chat:message-updated', {
-      messageId: String(populated._id),
+      conversationId: String(conversation._id),
+      message: populated,
     });
     emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
       conversationId: String(conversation._id),
@@ -726,6 +814,7 @@ exports.deleteMessage = async (req, res) => {
     await message.save();
 
     emitConversationEvent(conversation._id, 'chat:message-deleted', {
+      conversationId: String(conversation._id),
       messageId: String(message._id),
     });
     emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
@@ -767,6 +856,7 @@ exports.pinMessage = async (req, res) => {
       await conversation.save();
 
       emitConversationEvent(conversation._id, 'chat:pin-updated', {
+        conversationId: String(conversation._id),
         pinnedMessageId: String(message._id),
       });
       emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
@@ -805,6 +895,7 @@ exports.unpinMessage = async (req, res) => {
       await conversation.save();
 
       emitConversationEvent(conversation._id, 'chat:pin-updated', {
+        conversationId: String(conversation._id),
         pinnedMessageId: null,
       });
       emitUsersEvent(toIdArray(conversation.participants), 'chat:conversation-updated', {
@@ -854,6 +945,8 @@ exports.getAllConversationsAdmin = async (req, res) => {
           return title.includes(search.toLowerCase()) || participantNames.includes(search.toLowerCase());
         })
       : validConversations;
+
+    await attachLastMessages(filtered);
 
     res.json({ success: true, conversations: filtered });
   } catch (err) {
