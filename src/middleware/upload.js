@@ -17,14 +17,48 @@ const storage = multer.diskStorage({
   },
 });
 
+const allowedExtensions = [
+  '.jpeg',
+  '.jpg',
+  '.png',
+  '.gif',
+  '.webp',
+  '.heic',
+  '.heif',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.txt',
+  '.zip',
+];
+
+const allowedMimeTypes = [
+  'image/jpeg',
+  'image/pjpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'text/plain',
+  'application/zip',
+];
+
 const fileFilter = (req, file, cb) => {
-  const allowed = /jpeg|jpg|png|gif|pdf|doc|docx|xls|xlsx|txt|zip/;
-  const ext = allowed.test(path.extname(file.originalname).toLowerCase());
-  const mime = allowed.test(file.mimetype);
+  const ext = allowedExtensions.includes(path.extname(file.originalname).toLowerCase());
+  const mime = allowedMimeTypes.includes((file.mimetype || '').toLowerCase());
   if (ext || mime) {
     cb(null, true);
   } else {
-    cb(new Error('File type not supported'), false);
+    cb(new Error(`File type not supported: ${file.originalname} (${file.mimetype})`), false);
   }
 };
 
