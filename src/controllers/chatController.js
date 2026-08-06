@@ -1,5 +1,6 @@
 const ChatConversation = require('../models/ChatConversation');
 const ChatMessage = require('../models/ChatMessage');
+const ChatReadState = require('../models/ChatReadState');
 const User = require('../models/User');
 const Project = require('../models/Project');
 const { notifyMany } = require('../services/notificationService');
@@ -106,6 +107,20 @@ async function attachLastMessages(conversations) {
   return conversations;
 }
 
+// Attaches each conversation's server-tracked unread count for `userId`.
+// Uses a single query so the sidebar can show badges without an extra request
+// per conversation. Conversations with no ChatReadState row get 0.
+async function attachUnreadCounts(conversations, userId) {
+  if (!Array.isArray(conversations) || conversations.length === 0) return conversations;
+  const ids = conversations.map((c) => c._id);
+  const states = await ChatReadState.find({ conversation: { $in: ids }, user: userId }).select('conversation unreadCount').lean();
+  const map = new Map(states.map((s) => [String(s.conversation), Number(s.unreadCount) || 0]));
+  conversations.forEach((c) => {
+    c.unreadCount = map.get(String(c._id)) || 0;
+  });
+  return conversations;
+}
+
 async function resolveTeamUserIds(req) {
   // Team scope = users in same department + users in projects where requester is owner/team member
   const projectUserIds = await Project.aggregate([
@@ -142,18 +157,38 @@ exports.getConversations = async (req, res) => {
     await cleanupZeroMemberConversations();
 
     const { search = '' } = req.query;
+    // Pagination — only a page of conversations is loaded at a time so the
+    // sidebar renders quickly even for users in many chats. Default 30/page,
+    // hard-capped at 100.
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 30));
+    const skip = (page - 1) * limit;
+
     // Normal Chat page: everyone (including admin/super_admin) only sees
     // conversations they are actually a participant of. Full oversight is
     // available separately via getAllConversationsAdmin below.
     const query = { isArchived: false, participants: req.user._id };
 
+    const total = await ChatConversation.countDocuments(query);
+
+    // Light population — the sidebar only needs names + avatars for titles
+    // and previews. Full participant details (email/role/department) are
+    // loaded on demand via GET /conversations/:id when a chat is opened.
+// Using .lean() returns plain JS objects instead of Mongoose documents.
+    // This is essential because `attachLastMessages` dynamically attaches a
+    // `lastMessage` property that is NOT part of the ChatConversation schema.
+    // Mongoose's toJSON() only serializes schema-defined fields, so without
+    // .lean() that property would be silently dropped when the response is
+    // serialized — leaving the sidebar with no last-message preview even
+    // though the conversation has messages.
     const conversations = await ChatConversation.find(query)
-      .populate('participants', 'name email role avatar department')
-      .populate('admins', 'name email role avatar')
-      .populate('createdBy', 'name email role')
-      .populate({ path: 'pinnedMessage', select: 'body sender attachments', populate: { path: 'sender', select: 'name' } })
+      .populate('participants', 'name avatar')
+      .populate('admins', 'name avatar')
+      .populate('createdBy', 'name')
       .sort({ lastMessageAt: -1, updatedAt: -1 })
-      .limit(200);
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
     // Dispose conversations that have no resolvable participants (e.g. dangling user refs).
     const disposedIds = conversations
@@ -177,9 +212,45 @@ exports.getConversations = async (req, res) => {
         })
       : validConversations;
 
-    await attachLastMessages(filtered);
+await attachLastMessages(filtered);
+    await attachUnreadCounts(filtered, req.user._id);
 
-    res.json({ success: true, conversations: filtered });
+    res.json({
+      success: true,
+      conversations: filtered,
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/chat/conversations/:id
+// Loads the FULL conversation details (rich participant/admins/createdBy/
+// pinnedMessage population) only when a specific chat is opened. The sidebar
+// list (getConversations) stays light so the page loads fast.
+exports.getConversationById = async (req, res) => {
+  try {
+    const conversation = await ChatConversation.findById(req.params.id)
+      .populate('participants', 'name email role avatar department isActive')
+      .populate('admins', 'name email role avatar')
+      .populate('createdBy', 'name email role')
+      .populate({ path: 'pinnedMessage', select: 'body sender attachments', populate: { path: 'sender', select: 'name' } });
+
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
+    }
+
+    res.json({ success: true, conversation });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -622,9 +693,12 @@ exports.leaveConversation = async (req, res) => {
 };
 
 // GET /api/chat/conversations/:id/messages
+// Returns a page of the most-recent messages (newest first, then reversed to
+// chronological order for display). Optionally pass `before` to load older
+// messages. `hasMore` tells the client whether even older messages exist.
 exports.getMessages = async (req, res) => {
   try {
-    const { before, limit = 50 } = req.query;
+    const { before, limit = 10 } = req.query;
     const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
@@ -636,9 +710,11 @@ exports.getMessages = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
+    const pageSize = Math.min(50, Math.max(1, Number(limit) || 10));
     const query = { conversation: conversation._id, deletedAt: null };
     if (before) query.createdAt = { $lt: new Date(before) };
 
+    // Fetch one extra message beyond the page to detect whether more exist.
     const messages = await ChatMessage.find(query)
       .populate('sender', 'name email role avatar')
       .populate('mentions', 'name email role avatar')
@@ -648,9 +724,12 @@ exports.getMessages = async (req, res) => {
         populate: { path: 'sender', select: 'name' },
       })
       .sort({ createdAt: -1 })
-      .limit(Number(limit));
+      .limit(pageSize + 1);
 
-    res.json({ success: true, messages: messages.reverse() });
+    const hasMore = messages.length > pageSize;
+    const pageMessages = hasMore ? messages.slice(0, pageSize) : messages;
+
+    res.json({ success: true, messages: pageMessages.reverse(), hasMore });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -745,10 +824,27 @@ exports.sendMessage = async (req, res) => {
       replyTo,
     });
 
-    await ChatConversation.findByIdAndUpdate(conversation._id, {
+await ChatConversation.findByIdAndUpdate(conversation._id, {
       lastMessageAt: new Date(),
       updatedAt: new Date(),
     });
+
+    // Increment the server-tracked unread count for every participant except
+    // the sender. A per-user ChatReadState document is created on first use;
+    // the sender's unread count stays as-is (they just wrote the message).
+    const senderIdStr = String(req.user._id);
+    await Promise.all(
+      conversation.participants
+        .map((p) => String(p))
+        .filter((pid) => pid !== senderIdStr)
+        .map((recipientId) =>
+          ChatReadState.findOneAndUpdate(
+            { conversation: conversation._id, user: recipientId },
+            { $inc: { unreadCount: 1 } },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          )
+        )
+    );
 
     const populated = await ChatMessage.findById(message._id)
       .populate('sender', 'name email role avatar')
@@ -781,7 +877,51 @@ exports.sendMessage = async (req, res) => {
       reason: 'message_created',
     });
 
-    res.status(201).json({ success: true, message: populated });
+res.status(201).json({ success: true, message: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// POST /api/chat/conversations/:id/read
+// Marks a conversation as read for the current user, resetting their
+// server-tracked unread count to 0. Called when the user opens a chat.
+exports.markConversationRead = async (req, res) => {
+  try {
+    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    if (conversation && await disposeConversationIfEmpty(conversation)) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!isConversationMember(req, conversation)) {
+      return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
+    }
+
+    await ChatReadState.updateOne(
+      { conversation: conversation._id, user: req.user._id },
+      { unreadCount: 0 },
+      { upsert: true }
+    );
+
+    res.json({ success: true, unreadCount: 0 });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// GET /api/chat/unread-count
+// Returns the total number of unread messages across all of the current
+// user's conversations. Useful for a top-level badge on the chat nav item.
+exports.getUnreadCount = async (req, res) => {
+  try {
+    const result = await ChatReadState.aggregate([
+      { $match: { user: req.user._id, unreadCount: { $gt: 0 } } },
+      { $group: { _id: null, total: { $sum: '$unreadCount' } } },
+    ]);
+    const total = result[0]?.total || 0;
+    res.json({ success: true, unreadCount: total });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1005,13 +1145,17 @@ exports.getAllConversationsAdmin = async (req, res) => {
 
     await cleanupZeroMemberConversations();
 
-    const { search = '' } = req.query;
+const { search = '' } = req.query;
+    // .lean() so the dynamically-attached `lastMessage` (from
+    // attachLastMessages) survives JSON serialization — for the same reason as
+    // getConversations. Without it, Mongoose drops the non-schema property.
     const conversations = await ChatConversation.find({ isArchived: false })
       .populate('participants', 'name email role avatar department')
       .populate('admins', 'name email role avatar')
       .populate('createdBy', 'name email role')
       .sort({ lastMessageAt: -1, updatedAt: -1 })
-      .limit(500);
+      .limit(500)
+      .lean();
 
     const validConversations = conversations.filter(
       (c) => Array.isArray(c.participants) && c.participants.length > 0

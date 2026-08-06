@@ -1,6 +1,47 @@
+const path = require('path');
+const fs = require('fs');
 const User = require('../models/User');
 const PermissionAuditLog = require('../models/PermissionAuditLog');
 const { permissionsCache } = require('../middleware/auth');
+
+// @GET /api/users/:id/avatar
+// Dedicated profile-image endpoint. Streams the user's uploaded avatar directly,
+// or returns a generated SVG placeholder (with the user's initials) when they
+// have not uploaded one — so callers never have to handle a broken image.
+exports.getUserAvatar = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('avatar name');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    // Serve the uploaded avatar if it exists on disk.
+    if (user.avatar) {
+      const uploadsDir = path.join(__dirname, '../../uploads');
+      const filePath = path.join(uploadsDir, path.basename(user.avatar));
+      if (fs.existsSync(filePath)) {
+        res.set('Cache-Control', 'private, max-age=86400');
+        return res.sendFile(filePath);
+      }
+    }
+
+    // Fallback: dynamically generate an SVG placeholder with the person's initials.
+    const initials = String(user.name || '?')
+      .split(' ')
+      .map((p) => p[0] || '')
+      .join('')
+      .slice(0, 2)
+      .toUpperCase();
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">` +
+      `<rect width="200" height="200" fill="#4f46e5"/>` +
+      `<text x="100" y="124" font-family="Arial, sans-serif" font-size="84" font-weight="bold" fill="#ffffff" text-anchor="middle">${initials}</text>` +
+      `</svg>`;
+    res.set('Content-Type', 'image/svg+xml');
+    res.set('Cache-Control', 'no-store');
+    return res.send(svg);
+} catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
 
 // @GET /api/users
 exports.getUsers = async (req, res) => {
