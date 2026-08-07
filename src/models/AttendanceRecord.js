@@ -7,6 +7,13 @@ const attendanceRecordSchema = new mongoose.Schema(
     clockInAt: { type: Date, default: null },
     clockOutAt: { type: Date, default: null },
     workMinutes: { type: Number, default: 0 },
+    // Idle-adjusted worked time reported by the desktop Activity Tracker app.
+    // The desktop app auto-pauses while the user is idle, so its reported
+    // duration is the real working time. `workedMs` is the source of truth
+    // for working hours when present (falls back to wall-clock otherwise).
+    workedMs: { type: Number, default: 0 },
+    workedHours: { type: Number, default: 0 },
+ 
     status: {
       type: String,
       enum: ['present', 'late', 'half_day', 'remote', 'absent', 'leave', 'holiday'],

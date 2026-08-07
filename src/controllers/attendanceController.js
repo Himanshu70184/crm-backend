@@ -153,13 +153,13 @@ exports.clockIn = async (req, res) => {
     // Fail cleanly and immediately if the screenshot can't be saved, instead
     // of silently skipping the field and letting Mongoose's required-field
     // validation throw a confusing error later on record.save().
-    const savedInPath = saveScreenshotToDisk(screenshot, req.user._id, 'in');
-    if (!savedInPath) {
-      return res.status(400).json({
-        success: false,
-        message: 'Screenshot could not be saved. Please retry clocking in with a valid screenshot.',
-      });
-    }
+    const savedInPath = screenshot ? saveScreenshotToDisk(screenshot, req.user._id, 'in') : null;
+    // if (!savedInPath) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Screenshot could not be saved. Please retry clocking in with a valid screenshot.',
+    //   });
+    // }
 
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
@@ -214,16 +214,16 @@ exports.clockIn = async (req, res) => {
 // @POST /api/attendance/clock-out
 exports.clockOut = async (req, res) => {
   try {
-    const { note = '', screenshot = '' } = req.body;
+    const { note = '', screenshot = '', workedMs } = req.body;
 
     // Same fail-clean-and-early approach as clockIn above.
-    const savedOutPath = saveScreenshotToDisk(screenshot, req.user._id, 'out');
-    if (!savedOutPath) {
-      return res.status(400).json({
-        success: false,
-        message: 'Screenshot could not be saved. Please retry clocking out with a valid screenshot.',
-      });
-    }
+    const savedOutPath = screenshot ? saveScreenshotToDisk(screenshot, req.user._id, 'out') : null;
+    // if (!savedOutPath) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Screenshot could not be saved. Please retry clocking out with a valid screenshot.',
+    //   });
+    // }
 
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
@@ -234,17 +234,25 @@ exports.clockOut = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Clock in first before clocking out' });
     }
 
-    if (record.clockOutAt) {
-      return res.status(400).json({ success: false, message: 'You have already clocked out today' });
-    }
+    // if (record.clockOutAt) {
+    //   return res.status(400).json({ success: false, message: 'You have already clocked out today' });
+    // }
 
-    const clockOutAt = new Date();
-    const workMinutes = Math.max(0, Math.round((clockOutAt.getTime() - new Date(record.clockInAt).getTime()) / 60000));
+    // const clockOutAt = new Date();
+    const clockOutAt =record.clockOutAt || new Date();
+    const workedDurationMs = workedMs != null
+      ? Math.max(0, Number(workedMs))
+      : Math.max(0, clockOutAt.getTime() - new Date(record.clockInAt).getTime());
+    const workMinutes = Math.round(workedDurationMs / 60000);
+ 
+    // const workMinutes = Math.max(0, Math.round((clockOutAt.getTime() - new Date(record.clockInAt).getTime()) / 60000));
     const halfDayInfo = computeHalfDayInfo(workMinutes, shift);
     const earlyCheckout = computeEarlyCheckoutInfo(clockOutAt, attendanceDate, shift);
 
     record.clockOutAt = clockOutAt;
     record.workMinutes = workMinutes;
+    record.workedMs = workedDurationMs;
+    record.workedHours = Math.round((workedDurationMs / 3600000) * 100) / 100;
     record.note = note || record.note;
     record.shiftCode = shift.code;
     record.shiftName = shift.name;
@@ -279,7 +287,18 @@ exports.getTodayAttendance = async (req, res) => {
     const elevated = canViewAllAttendance(req.user);
     const userId = elevated && req.query.user ? req.query.user : req.user._id;
     const record = await findTodayRecord(userId);
-    res.json({ success: true, record });
+    const todayRecord = record ? record.toObject() : null;
+    if (todayRecord && todayRecord.clockInAt && !todayRecord.clockOutAt) {
+      // Live worked duration for an in-progress day (wall-clock) so the
+      // desktop app / UI can show current progress before clock-out.
+      const liveMs = Math.max(0, Date.now() - new Date(todayRecord.clockInAt).getTime());
+      todayRecord.workedMs = todayRecord.workedMs > 0 ? todayRecord.workedMs : liveMs;
+      todayRecord.workedHours = Math.round((todayRecord.workedMs / 3600000) * 100) / 100;
+    }
+ 
+    res.json({ success: true, record: todayRecord });
+ 
+    // res.json({ success: true, record });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
