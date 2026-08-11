@@ -240,9 +240,16 @@ exports.clockOut = async (req, res) => {
 
     // const clockOutAt = new Date();
     const clockOutAt =record.clockOutAt || new Date();
+    // Prefer the actual tracked time from the desktop Activity Tracker app.
+    // If no workedMs is provided (e.g. web UI clock-out) but the desktop app
+    // has already reported live tracked time, keep that as the source of
+    // truth instead of falling back to wall-clock (which includes idle/paused
+    // periods). Only fall back to wall-clock when no tracked time exists.
     const workedDurationMs = workedMs != null
       ? Math.max(0, Number(workedMs))
-      : Math.max(0, clockOutAt.getTime() - new Date(record.clockInAt).getTime());
+      : (record.workedMs > 0
+          ? Math.max(0, Number(record.workedMs))
+          : Math.max(0, clockOutAt.getTime() - new Date(record.clockInAt).getTime()));
     const workMinutes = Math.round(workedDurationMs / 60000);
  
     // const workMinutes = Math.max(0, Math.round((clockOutAt.getTime() - new Date(record.clockInAt).getTime()) / 60000));
@@ -265,7 +272,57 @@ exports.clockOut = async (req, res) => {
         ? 'late'
         : 'present';
     record.updatedBy = req.user._id;
-    record.clockOutScreenshot = savedOutPath;
+    // Preserve the existing clock-out screenshot when the desktop Activity
+    // Tracker reports worked time without a new screenshot (it only sends
+    // workedMs). Overwriting with null would fail the schema's required
+    // validation for clockOutScreenshot when clockOutAt is set.
+    if (savedOutPath) {
+      record.clockOutScreenshot = savedOutPath;
+    }
+
+    await record.save();
+
+    const populated = await AttendanceRecord.findById(record._id)
+      .populate('user', 'name email avatar role department shiftCode')
+      .populate('leaveRequest', 'leaveType status startDate endDate')
+      .populate('createdBy', 'name email role')
+      .populate('updatedBy', 'name email role');
+
+    res.json({ success: true, record: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @PUT /api/attendance/today/worked
+exports.updateLiveWorkedTime = async (req, res) => {
+  try {
+    const { workedMs } = req.body;
+    if (workedMs == null) {
+      return res.status(400).json({ success: false, message: 'workedMs is required' });
+    }
+
+    const policy = await getAttendancePolicy();
+    const shift = resolveUserShift(req.user, policy);
+    const attendanceDate = getAttendanceDayForShift(shift, new Date());
+    const record = await AttendanceRecord.findOne({ user: req.user._id, attendanceDate });
+
+    if (!record || !record.clockInAt) {
+      return res.status(400).json({ success: false, message: 'Clock in first before reporting worked time' });
+    }
+
+    // Live idle-adjusted worked time reported by the desktop Activity Tracker
+    // app. This is the source of truth for working hours while the day is
+    // still in progress (before clock-out), so the UI shows the actual
+    // tracked time rather than wall-clock (which includes idle/paused time).
+    const incomingWorkedMs = Math.max(0, Number(workedMs));
+    // Guard against client restarts/re-logins sending a smaller value.
+    // Live worked time should be monotonic while the user remains checked in.
+    const workedDurationMs = Math.max(0, Number(record.workedMs || 0), incomingWorkedMs);
+    record.workMinutes = Math.round(workedDurationMs / 60000);
+    record.workedMs = workedDurationMs;
+    record.workedHours = Math.round((workedDurationMs / 3600000) * 100) / 100;
+    record.updatedBy = req.user._id;
 
     await record.save();
 

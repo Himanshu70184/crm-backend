@@ -53,20 +53,32 @@ exports.startTimer = async (req, res) => {
     const task = await Task.findById(req.params.id);
     if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
-    await ActiveTimer.findOneAndDelete({ user: req.user._id });
-
-    const timer = await ActiveTimer.create({
-      user: req.user._id,
-      task: task._id,
-      project: task.project,
-      status: 'running',
-      accumulatedMs: 0,
-      resumedAt: new Date(),
-    });
+    // If the user already has an active timer for this same task, keep its
+    // accumulated time and simply resume it. This prevents re-logins / app
+    // restarts (while the user is still checked in) from wiping the user's
+    // previously tracked time. Only starting a *different* task creates a
+    // fresh timer from zero.
+    let timer = await ActiveTimer.findOne({ user: req.user._id });
+    if (timer && String(timer.task) === String(task._id)) {
+      timer.project = task.project;
+      timer.status = 'running';
+      timer.resumedAt = new Date();
+      await timer.save();
+    } else {
+      if (timer) await ActiveTimer.findByIdAndDelete(timer._id);
+      timer = await ActiveTimer.create({
+        user: req.user._id,
+        task: task._id,
+        project: task.project,
+        status: 'running',
+        accumulatedMs: 0,
+        resumedAt: new Date(),
+      });
+    }
 
     await logTaskActivity(req.user, 'Started time tracker', task._id, { taskTitle: task.title });
 
-    res.json({ success: true, timer, elapsedMs: 0 });
+    res.json({ success: true, timer, elapsedMs: getElapsedMs(timer) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

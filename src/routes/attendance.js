@@ -7,6 +7,7 @@ const {
   clockIn,
   clockOut,
   getTodayAttendance,
+  updateLiveWorkedTime,
   getLeaveRequests,
   applyLeave,
   reviewLeave,
@@ -21,6 +22,7 @@ router.get('/today', checkPermission('attendance', 'read'), getTodayAttendance);
 router.get('/', checkPermission('attendance', 'read'), getAttendanceRecords);
 router.post('/clock-in', checkPermission('attendance', 'create'), clockIn);
 router.post('/clock-out', checkPermission('attendance', 'update'), clockOut);
+router.put('/today/worked', checkPermission('attendance', 'update'), updateLiveWorkedTime);
 router.post('/reconcile', checkPermission('attendance', 'update'), reconcileAttendance);
 
 router.get('/leaves', checkPermission('leave', 'read'), getLeaveRequests);

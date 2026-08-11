@@ -89,6 +89,8 @@ function normalizeAttendancePolicy(raw = {}) {
     weeklyOffDays,
     holidays,
     autoMarkEnabled: raw.autoMarkEnabled !== false,
+    idleTimeoutMinutes: Math.max(1, Math.min(120, Number(raw.idleTimeoutMinutes) || 5)),
+    screenshotIntervalMinutes: Math.max(1, Math.min(120, Number(raw.screenshotIntervalMinutes)) || 10),
   };
 }
 
