@@ -27,7 +27,8 @@ const { verifyEmailConnection } = require('./src/services/emailService');
 const { startDeadlineCron } = require('./src/jobs/deadlineReminders');
 const { startAttendanceReconcileCron } = require('./src/jobs/attendanceReconciliation');
 
-connectDB();
+// Note: connectDB() is awaited in startServer() below so the server never
+// accepts requests (or runs startup queries) before MongoDB is connected.
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -110,10 +111,26 @@ app.use((err, req, res, next) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', async () => {
-  console.log(`Server running on http://127.0.0.1:${PORT}`);
-  const emailStatus = await verifyEmailConnection();
-  console.log(emailStatus.ok ? `✓ ${emailStatus.message}` : `⚠ Email: ${emailStatus.message}`);
-  startDeadlineCron();
-  startAttendanceReconcileCron();
+// Start listening only after MongoDB is connected. Otherwise any query issued
+// at startup (e.g. verifyEmailConnection -> Settings.findOne()) gets buffered
+// by Mongoose and crashes with "buffering timed out after 10000ms".
+const startServer = async () => {
+  await connectDB();
+
+  server.listen(PORT, '0.0.0.0', async () => {
+    console.log(`Server running on http://127.0.0.1:${PORT}`);
+    try {
+      const emailStatus = await verifyEmailConnection();
+      console.log(emailStatus.ok ? `✓ ${emailStatus.message}` : `⚠ Email: ${emailStatus.message}`);
+    } catch (err) {
+      console.error(`⚠ Email check failed: ${err.message}`);
+    }
+    startDeadlineCron();
+    startAttendanceReconcileCron();
+  });
+};
+
+startServer().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
 });
