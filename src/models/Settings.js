@@ -81,7 +81,6 @@ const attendancePolicySchema = new mongoose.Schema(
     // Desktop Activity Tracker (working-hours tracking) settings — managed by
     // admins here and read-only inside the desktop app.
     idleTimeoutMinutes: { type: Number, default: 5, min: 1, max: 120 },
-    screenshotIntervalMinutes: { type: Number, default: 10, min: 1, max: 120 },
   },
   { _id: false }
 );

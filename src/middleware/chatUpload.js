@@ -2,7 +2,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Mirrors the existing uploads/attendance-screenshots/ convention.
 // server.js serves express.static(path.join(__dirname, 'uploads')) from the
 // backend ROOT. This middleware file lives at src/middleware/chatUpload.js,
 // so we must go up two levels (src/middleware -> src -> root) to land in

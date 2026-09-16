@@ -32,28 +32,6 @@ const attendanceRecordSchema = new mongoose.Schema(
     isHoliday: { type: Boolean, default: false },
     holidayName: { type: String, default: '' },
     note: { type: String, default: '' },
-    clockInScreenshot: {
-      type: String,
-      required: [function () { return !!this.clockInAt; }, 'clockInScreenshot is required when clocked in'],
-      validate: {
-        validator: function (v) {
-          if (!this.clockInAt) return true; // no clock-in on this record — screenshot doesn't apply
-          return typeof v === 'string' && v.trim().length > 0;
-        },
-        message: 'clockInScreenshot cannot be empty when clocked in',
-      },
-    },
-    clockOutScreenshot: {
-      type: String,
-      required: [function () { return !!this.clockOutAt; }, 'clockOutScreenshot is required when clocked out'],
-      validate: {
-        validator: function (v) {
-          if (!this.clockOutAt) return true; // no clock-out on this record — screenshot doesn't apply
-          return typeof v === 'string' && v.trim().length > 0;
-        },
-        message: 'clockOutScreenshot cannot be empty when clocked out',
-      },
-    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
