@@ -1,7 +1,6 @@
 const AttendanceRecord = require('../models/AttendanceRecord');
 const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
-const { saveScreenshotToDisk } = require('../services/screenshotStorageService');
 const {
   getDayBounds,
   getAttendancePolicy,
@@ -148,18 +147,7 @@ exports.getAttendanceRecords = async (req, res) => {
 // @POST /api/attendance/clock-in
 exports.clockIn = async (req, res) => {
   try {
-    const { note = '', screenshot = '' } = req.body;
-
-    // Fail cleanly and immediately if the screenshot can't be saved, instead
-    // of silently skipping the field and letting Mongoose's required-field
-    // validation throw a confusing error later on record.save().
-    const savedInPath = screenshot ? saveScreenshotToDisk(screenshot, req.user._id, 'in') : null;
-    // if (!savedInPath) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: 'Screenshot could not be saved. Please retry clocking in with a valid screenshot.',
-    //   });
-    // }
+    const { note = '' } = req.body;
 
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
@@ -195,7 +183,6 @@ exports.clockIn = async (req, res) => {
     record.holidayName = '';
     record.status = lateInfo.isLate ? 'late' : 'present';
     record.updatedBy = req.user._id;
-    record.clockInScreenshot = savedInPath;
 
     await record.save();
 
@@ -214,16 +201,7 @@ exports.clockIn = async (req, res) => {
 // @POST /api/attendance/clock-out
 exports.clockOut = async (req, res) => {
   try {
-    const { note = '', screenshot = '', workedMs } = req.body;
-
-    // Same fail-clean-and-early approach as clockIn above.
-    const savedOutPath = screenshot ? saveScreenshotToDisk(screenshot, req.user._id, 'out') : null;
-    // if (!savedOutPath) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: 'Screenshot could not be saved. Please retry clocking out with a valid screenshot.',
-    //   });
-    // }
+    const { note = '', workedMs } = req.body;
 
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
@@ -272,13 +250,6 @@ exports.clockOut = async (req, res) => {
         ? 'late'
         : 'present';
     record.updatedBy = req.user._id;
-    // Preserve the existing clock-out screenshot when the desktop Activity
-    // Tracker reports worked time without a new screenshot (it only sends
-    // workedMs). Overwriting with null would fail the schema's required
-    // validation for clockOutScreenshot when clockOutAt is set.
-    if (savedOutPath) {
-      record.clockOutScreenshot = savedOutPath;
-    }
 
     await record.save();
 
