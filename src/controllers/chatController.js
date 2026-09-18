@@ -8,8 +8,12 @@ const { emitConversationEvent, emitUsersEvent } = require('../socket/chatSocket'
 
 // Strict: used everywhere in the normal Chat page. Only actual participants
 // get access — admin/super_admin included, no automatic bypass.
+// NOTE: `participants` may be raw ObjectIds OR fully populated user documents
+// (e.g. getConversationById populates before checking), so compare against
+// `p._id` when present — matching the toIdArray() convention below.
 function isConversationMember(req, conversation) {
-  return conversation.participants.some((p) => String(p) === String(req.user._id));
+  const userId = String(req.user._id);
+  return (conversation.participants || []).some((p) => String(p?._id || p) === userId);
 }
 
 // Looser: used ONLY for message moderation (edit/delete) and the separate
@@ -24,8 +28,10 @@ function hasModerationAccess(req, conversation) {
 // roles do NOT automatically get group-management rights here; only users listed
 // in the conversation's own `admins` array do. This keeps group ownership meaningful
 // even for orgs where every user happens to have the 'admin' platform role.
+// Handles both raw ObjectIds and populated admin documents (see isConversationMember).
 function isGroupAdmin(req, conversation) {
-  return (conversation.admins || []).some((a) => String(a) === String(req.user._id));
+  const userId = String(req.user._id);
+  return (conversation.admins || []).some((a) => String(a?._id || a) === userId);
 }
 
 async function disposeConversation(conversationId) {
