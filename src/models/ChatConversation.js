@@ -12,6 +12,15 @@ const chatConversationSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     project: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
     avatar: { type: String, default: '' },
+    // Users who LEFT this group. They are no longer participants (can't send /
+    // receive new messages) but keep read-only access to the chat history until
+    // they explicitly delete it via DELETE /conversations/:id/left.
+    leftUsers: [
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        leftAt: { type: Date, default: Date.now },
+      },
+    ],
     isArchived: { type: Boolean, default: false },
     lastMessageAt: { type: Date, default: Date.now },
     // The currently pinned message for this conversation (group-wide/everyone scope).

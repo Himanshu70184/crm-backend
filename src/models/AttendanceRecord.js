@@ -16,12 +16,24 @@ const attendanceRecordSchema = new mongoose.Schema(
  
     status: {
       type: String,
-      enum: ['present', 'late', 'half_day', 'remote', 'absent', 'leave', 'holiday'],
+      enum: ['present', 'late', 'half_day', 'remote', 'absent', 'leave', 'holiday', 'pending'],
       default: 'present',
     },
     isLate: { type: Boolean, default: false },
     isHalfDay: { type: Boolean, default: false },
     lateMinutes: { type: Number, default: 0 },
+    // Late check-in approval workflow: when a user (except Super Admin) clocks
+    // in after shift start + grace, they must provide a reason and the record
+    // goes to status 'pending' until an eligible approver reviews it.
+    lateReason: { type: String, default: '', trim: true, maxlength: 500 },
+    lateApprovalStatus: {
+      type: String,
+      enum: ['pending', 'approved', 'rejected', null],
+      default: null,
+    },
+    lateReviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    lateReviewedAt: { type: Date, default: null },
+    lateReviewNote: { type: String, default: '' },
     isEarlyCheckout: { type: Boolean, default: false },
     earlyCheckoutMinutes: { type: Number, default: 0 },
     shiftCode: { type: String, default: '' },

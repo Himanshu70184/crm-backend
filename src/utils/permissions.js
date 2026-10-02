@@ -119,6 +119,8 @@ function managerPermissions() {
   p.attendance.create = { enabled: true, dataScope: 'own' };
   p.attendance.read   = { enabled: true, dataScope: 'own' };
   p.attendance.update = { enabled: true, dataScope: 'own' };
+  // Managers may review/approve their team's pending late check-ins.
+  p.attendance.approve = { enabled: true, dataScope: 'team' };
   p.leave.create = { enabled: true, dataScope: 'own' };
   p.leave.read = { enabled: true, dataScope: 'own' };
   p.chat.create = { enabled: true, dataScope: 'team' };

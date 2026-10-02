@@ -1,17 +1,182 @@
 const AttendanceRecord = require('../models/AttendanceRecord');
 const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
+const Settings = require('../models/Settings');
 const {
   getDayBounds,
+  toDateKey,
+  enumerateDays,
   getAttendancePolicy,
   resolveUserShift,
   getAttendanceDayForShift,
   computeLateInfo,
   computeHalfDayInfo,
   computeEarlyCheckoutInfo,
+  isWeeklyOff,
+  getMonthlyOffRuleForDate,
+  getHolidayForDate,
   calculateLeaveDayCount,
   reconcileMissingAttendanceRecords,
 } = require('../services/attendancePolicyService');
+const { notifyUser, notifyMany } = require('../services/notificationService');
+const { sendEmail } = require('../services/emailService');
+
+// Leave type helpers ────────────────────────────────────────────────────────
+// The UI/database may hold legacy spellings ('Half-Day', 'Personal Resion').
+// Everything is normalized to a canonical snake_case value so counting and
+// email rendering stay predictable.
+const LEAVE_TYPE_LABELS = {
+  annual: 'Annual Leave',
+  sick: 'Sick Leave',
+  casual: 'Casual Leave',
+  half_day: 'Half Day Leave',
+  personal: 'Personal Leave',
+  unpaid: 'Unpaid Leave',
+  other: 'Other',
+};
+
+function normalizeLeaveType(rawType = '') {
+  const key = String(rawType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (key === 'half_day' || key === 'halfday') return 'half_day';
+  if (key === 'personal_resion' || key === 'personal_reason' || key === 'personal') return 'personal';
+  if (LEAVE_TYPE_LABELS[key]) return key;
+  return 'other';
+}
+
+function isHalfDayLeaveType(rawType = '') {
+  return normalizeLeaveType(rawType) === 'half_day';
+}
+
+function leaveTypeLabel(rawType = '') {
+  return LEAVE_TYPE_LABELS[normalizeLeaveType(rawType)] || 'Leave';
+}
+
+function formatLongDate(dateInput) {
+  return new Date(dateInput).toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+// Emails the employee the outcome of their leave request, including the
+// reviewer's rejection reason. Never throws - a mail failure must not break the
+// review itself.
+async function sendLeaveReviewEmail({ leave, status, decisionLabel, reviewerLine, typeLabel, noteText }) {
+  try {
+    const requester = await User.findById(leave.user).select('name email role');
+    if (!requester?.email) return;
+
+    const settings = await Settings.findOne().lean();
+    const company = settings?.branding?.appName || settings?.companyName || 'CRM Pro';
+    const statusColor = status === 'approved' ? '#16a34a' : status === 'rejected' ? '#dc2626' : '#6b7280';
+    const noteLabel = status === 'rejected' ? 'Reason for rejection' : 'Reviewer note';
+    const plainNote = noteText || 'No reason provided.';
+    const startLabel = formatLongDate(leave.startDate);
+    const endLabel = formatLongDate(leave.endDate);
+    const reviewedLabel = formatLongDate(new Date());
+
+    const text = [
+      '============================================================',
+      `           LEAVE REQUEST ${decisionLabel.toUpperCase()}`,
+      '============================================================',
+      '',
+      `Employee:      ${requester.name} (${requester.role})`,
+      `Company:       ${company}`,
+      '',
+      '------------------------------------------------------------',
+      '                          DETAILS',
+      '------------------------------------------------------------',
+      '',
+      `Leave Type:    ${typeLabel}`,
+      `Start Date:    ${startLabel}`,
+      `End Date:      ${endLabel}`,
+      `Total Days:    ${leave.totalDays} day(s)`,
+      `Status:        ${decisionLabel.toUpperCase()}`,
+      '',
+      `Reviewed By:   ${reviewerLine}`,
+      `Reviewed On:   ${reviewedLabel}`,
+      '',
+      `${noteLabel}:`,
+      plainNote,
+      '',
+      '============================================================',
+      `This is an automated notification from ${company}.`,
+      'Please do not reply to this email.',
+      '============================================================',
+    ].join('\n');
+
+    const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: ${statusColor}; color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }
+                .header h1 { margin: 0; font-size: 22px; }
+                .content { background: #f9f9f9; padding: 25px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0; }
+                .info-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+                .info-table td { padding: 12px 15px; border-bottom: 1px solid #e0e0e0; }
+                .info-table td:first-child { font-weight: bold; width: 150px; color: #555; background: #f0f0f0; }
+                .note { background: #fff; border-left: 4px solid ${statusColor}; padding: 12px 16px; margin-top: 10px; }
+                .footer { text-align: center; margin-top: 25px; padding-top: 15px; border-top: 1px solid #e0e0e0; color: #888; font-size: 12px; }
+              </style>
+            </head>
+            <body>
+              <div class="header">
+                <h1>Leave Request ${decisionLabel}</h1>
+              </div>
+              <div class="content">
+                <p>Hello ${requester.name},</p>
+                <p>Your leave request has been <strong>${decisionLabel.toLowerCase()}</strong> by ${reviewerLine}.</p>
+
+                <table class="info-table">
+                  <tr><td>Leave Type</td><td><strong>${typeLabel}</strong></td></tr>
+                  <tr><td>Start Date</td><td>${startLabel}</td></tr>
+                  <tr><td>End Date</td><td>${endLabel}</td></tr>
+                  <tr><td>Total Days</td><td><strong>${leave.totalDays} day(s)</strong></td></tr>
+                  <tr><td>Status</td><td><strong style="color:${statusColor}">${decisionLabel.toUpperCase()}</strong></td></tr>
+                  <tr><td>Reviewed By</td><td>${reviewerLine}</td></tr>
+                  <tr><td>Reviewed On</td><td>${reviewedLabel}</td></tr>
+                </table>
+
+                <p><strong>${noteLabel}:</strong></p>
+                <div class="note">${plainNote}</div>
+              </div>
+              <div class="footer">
+                <p>This is an automated notification from <strong>${company}</strong></p>
+                <p>Please do not reply to this email.</p>
+              </div>
+            </body>
+            </html>
+          `;
+
+    const result = await sendEmail({
+      to: requester.email,
+      subject: `[${company}] Leave Request ${decisionLabel}: ${typeLabel}`,
+      text,
+      html,
+    });
+
+    // Track the outcome email on the request so Admin/HR can audit every
+    // message that was sent for it.
+    leave.emailSentTo = [
+      ...(leave.emailSentTo || []),
+      {
+        recipient: requester._id,
+        email: requester.email,
+        sentAt: new Date(),
+        delivered: !!result?.sent,
+      },
+    ];
+    await leave.save();
+  } catch (mailErr) {
+    console.error('Leave review email failed:', mailErr.message);
+  }
+}
 
 const ALLOWED_OVERVIEW_ROLES = ['super_admin', 'admin', 'hr'];
 
@@ -19,11 +184,92 @@ function canViewAllAttendance(user) {
   return ALLOWED_OVERVIEW_ROLES.includes(user?.role);
 }
 
+// ─── Late check-in approval workflow ─────────────────────────────────────────
+// Every role except super_admin must provide a reason when clocking in after
+// shift start + grace. The record goes to status 'pending' until reviewed.
+//
+// Approval routing (based on the requester's role):
+//   team_lead / team_member / member / others -> super_admin, admin, hr, manager
+//   hr / manager                              -> super_admin, admin
+//   admin                                     -> super_admin
+//   super_admin                               -> never requires approval
+const LATE_APPROVAL_EXEMPT_ROLES = ['super_admin'];
+
+function isLateApprovalRequired(user) {
+  return !LATE_APPROVAL_EXEMPT_ROLES.includes(user?.role);
+}
+
+function getApproversForRequester(requesterRole = '') {
+  if (requesterRole === 'admin') return ['super_admin'];
+  if (requesterRole === 'hr' || requesterRole === 'manager') return ['super_admin', 'admin'];
+  return ['super_admin', 'admin', 'hr', 'manager'];
+}
+
+function canApproveLateCheckIn(approverRole, requesterRole) {
+  if (approverRole === 'super_admin') return true;
+  return getApproversForRequester(requesterRole).includes(approverRole);
+}
+
+function formatApprovalDate(dateInput) {
+  return new Date(dateInput).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+async function notifyLateCheckInApprovers({ requester, record, lateMinutes }) {
+  const approverRoles = getApproversForRequester(requester.role);
+  const approvers = await User.find({
+    role: { $in: approverRoles },
+    isActive: true,
+    _id: { $ne: requester._id },
+  }).select('_id');
+  if (!approvers.length) return;
+
+  const dateLabel = formatApprovalDate(record.attendanceDate);
+  await notifyMany(
+    approvers.map((approver) => ({
+      recipientId: approver._id,
+      senderId: requester._id,
+      type: 'late_checkin_pending',
+      title: 'Late check-in needs approval',
+      message: `${requester.name} (${requester.role}) clocked in ${lateMinutes} min late on ${dateLabel}. Reason: ${record.lateReason}`,
+      link: '/attendance',
+    }))
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function findTodayRecord(userId) {
+  // Shift-aligned lookup: overnight shifts can attribute a clock-in (e.g. just
+  // after midnight) to the PREVIOUS attendance day, so the record's
+  // attendanceDate may not be the plain calendar day. Try the shift-aware day
+  // first (the exact day clockIn/clockOut write), then fall back to the
+  // calendar day so legacy records still surface. Without this, a night-shift
+  // user's Today card kept showing "Clock In" after a successful clock-in.
   const { start, end } = getDayBounds();
-  return AttendanceRecord.findOne({ user: userId, attendanceDate: { $gte: start, $lte: end } })
-    .populate('user', 'name email avatar role department shiftCode')
-    .populate('leaveRequest', 'leaveType status startDate endDate');
+  const populate = [
+    { path: 'user', select: 'name email avatar role department shiftCode' },
+    { path: 'leaveRequest', select: 'leaveType status startDate endDate' },
+  ];
+  try {
+    const targetUser = await User.findById(userId).select('shiftCode');
+    if (targetUser) {
+      const policy = await getAttendancePolicy();
+      const shift = resolveUserShift(targetUser, policy);
+      const shiftDay = getAttendanceDayForShift(shift, new Date());
+      const byShiftDay = await AttendanceRecord
+        .findOne({ user: userId, attendanceDate: shiftDay })
+        .populate(populate);
+      if (byShiftDay) return byShiftDay;
+    }
+  } catch (shiftLookupErr) {
+    console.error('findTodayRecord shift-aligned lookup failed:', shiftLookupErr.message);
+  }
+  return AttendanceRecord
+    .findOne({ user: userId, attendanceDate: { $gte: start, $lte: end } })
+    .populate(populate);
 }
 
 async function buildSummary(query, todayRecord) {
@@ -49,9 +295,20 @@ async function buildSummary(query, todayRecord) {
           },
         },
         lateCount: { $sum: { $cond: [{ $eq: ['$isLate', true] }, 1, 0] } },
+        // Half-day leave days are flagged with BOTH isHalfDay and isOnLeave so
+        // they show in the "Half Days" box; leaveCount therefore excludes them
+        // to keep the two boxes from double-counting the same day.
         halfDayCount: { $sum: { $cond: [{ $eq: ['$isHalfDay', true] }, 1, 0] } },
         absentCount: { $sum: { $cond: [{ $eq: ['$isAbsent', true] }, 1, 0] } },
-        leaveCount: { $sum: { $cond: [{ $eq: ['$isOnLeave', true] }, 1, 0] } },
+        leaveCount: {
+          $sum: {
+            $cond: [
+              { $and: [{ $eq: ['$isOnLeave', true] }, { $ne: ['$isHalfDay', true] }] },
+              1,
+              0,
+            ],
+          },
+        },
         // holidayCount is computed from the policy (unique holidays in range), not here
         remoteCount: { $sum: { $cond: [{ $eq: ['$status', 'remote'] }, 1, 0] } },
         totalMinutes: { $sum: '$workMinutes' },
@@ -120,23 +377,34 @@ exports.getAttendanceRecords = async (req, res) => {
         .populate('leaveRequest', 'leaveType status startDate endDate')
         .populate('createdBy', 'name email role')
         .populate('updatedBy', 'name email role')
+        .populate('lateReviewedBy', 'name email role')
         .sort({ attendanceDate: -1, updatedAt: -1 })
         .skip((page - 1) * limit)
         .limit(Number(limit)),
       buildSummary(query, todayRecord),
     ]);
 
-    // Compute holidayCount from the policy (unique holidays in range),
+    // Compute holidayCount from the policy (unique holiday dates in range),
     // not from attendance records (which creates one record per user per
     // holiday, causing the count to multiply when all users are selected).
+    // Monthly off rules (e.g. 2nd Saturday off) are counted too — a date Set
+    // keeps fixed holidays and monthly-off days from being double-counted.
+    // Regular weekly off days are still not counted (unchanged behavior).
     const policy = await getAttendancePolicy();
     const rangeStartMs = rangeStart.getTime();
     const rangeEndMs = rangeEnd.getTime();
-    const holidaysInRange = (policy.holidays || []).filter((h) => {
+    const holidayDateKeys = new Set();
+    for (const h of policy.holidays || []) {
       const hMs = new Date(h.date).getTime();
-      return hMs >= rangeStartMs && hMs <= rangeEndMs;
-    });
-    summary.holidayCount = holidaysInRange.length;
+      if (hMs >= rangeStartMs && hMs <= rangeEndMs) holidayDateKeys.add(toDateKey(h.date));
+    }
+    if ((policy.monthlyOffRules || []).length > 0) {
+      for (const day of enumerateDays(rangeStart, rangeEnd)) {
+        if (isWeeklyOff(day, policy)) continue;
+        if (getMonthlyOffRuleForDate(day, policy)) holidayDateKeys.add(toDateKey(day));
+      }
+    }
+    summary.holidayCount = holidayDateKeys.size;
 
     res.json({ success: true, records, summary, total: records.length });
   } catch (err) {
@@ -147,7 +415,16 @@ exports.getAttendanceRecords = async (req, res) => {
 // @POST /api/attendance/clock-in
 exports.clockIn = async (req, res) => {
   try {
-    const { note = '' } = req.body;
+    const { note = '', lateReason = '' } = req.body;
+
+    // Admins and Super Admins do not need to perform check-in;
+    // they manage attendance for others. Block them from clocking in.
+    if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admins and Super Admins cannot perform check-in. This action is reserved for non-administrative roles.',
+      });
+    }
 
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
@@ -155,17 +432,41 @@ exports.clockIn = async (req, res) => {
     const existing = await AttendanceRecord.findOne({ user: req.user._id, attendanceDate });
 
     if (existing?.clockInAt) {
-      return res.status(400).json({ success: false, message: 'You have already clocked in today' });
+      // Idempotent double-click: return the existing record instead of an
+      // error so the UI syncs to the current state (Clock Out / Pending)
+      // instead of showing a confusing "already clocked in" popup.
+      const populatedExisting = await AttendanceRecord.findById(existing._id)
+        .populate('user', 'name email avatar role department shiftCode')
+        .populate('leaveRequest', 'leaveType status startDate endDate')
+        .populate('createdBy', 'name email role')
+        .populate('updatedBy', 'name email role')
+        .populate('lateReviewedBy', 'name email role');
+      return res.json({ success: true, alreadyClockedIn: true, record: populatedExisting });
     }
 
     const clockInAt = new Date();
+    const lateInfo = computeLateInfo(clockInAt, attendanceDate, shift);
+
+    // Late check-in (after shift start + grace) requires a reason from every
+    // role except Super Admin, and the record stays 'pending' until reviewed.
+    const needsLateApproval = lateInfo.isLate && isLateApprovalRequired(req.user);
+    const trimmedReason = String(lateReason || '').trim();
+    if (needsLateApproval && !trimmedReason) {
+      return res.status(400).json({
+        success: false,
+        message: `You are ${lateInfo.lateMinutes} minute(s) late. Please provide the reason for your delayed check-in.`,
+        code: 'LATE_REASON_REQUIRED',
+        lateMinutes: lateInfo.lateMinutes,
+        shiftName: shift.name,
+      });
+    }
+
     const record = existing || new AttendanceRecord({
       user: req.user._id,
       attendanceDate,
       createdBy: req.user._id,
     });
 
-    const lateInfo = computeLateInfo(clockInAt, attendanceDate, shift);
     record.clockInAt = clockInAt;
     record.clockOutAt = existing?.clockOutAt || null;
     record.note = note || record.note;
@@ -181,7 +482,18 @@ exports.clockIn = async (req, res) => {
     record.leaveRequest = null;
     record.isHoliday = false;
     record.holidayName = '';
-    record.status = lateInfo.isLate ? 'late' : 'present';
+    if (needsLateApproval) {
+      record.status = 'pending';
+      record.lateReason = trimmedReason.slice(0, 500);
+      record.lateApprovalStatus = 'pending';
+    } else {
+      record.status = lateInfo.isLate ? 'late' : 'present';
+      record.lateReason = '';
+      record.lateApprovalStatus = null;
+    }
+    record.lateReviewedBy = null;
+    record.lateReviewedAt = null;
+    record.lateReviewNote = '';
     record.updatedBy = req.user._id;
 
     await record.save();
@@ -190,7 +502,18 @@ exports.clockIn = async (req, res) => {
       .populate('user', 'name email avatar role department shiftCode')
       .populate('leaveRequest', 'leaveType status startDate endDate')
       .populate('createdBy', 'name email role')
-      .populate('updatedBy', 'name email role');
+      .populate('updatedBy', 'name email role')
+      .populate('lateReviewedBy', 'name email role');
+
+    // Send the late reason to the eligible approvers (Admin/HR/Manager for
+    // regular staff; Super Admin/Admin when the requester is HR or Manager).
+    if (needsLateApproval) {
+      await notifyLateCheckInApprovers({
+        requester: req.user,
+        record,
+        lateMinutes: lateInfo.lateMinutes,
+      });
+    }
 
     res.status(201).json({ success: true, record: populated });
   } catch (err) {
@@ -203,6 +526,15 @@ exports.clockOut = async (req, res) => {
   try {
     const { note = '', workedMs } = req.body;
 
+    // Admins and Super Admins do not perform check-in/check-out;
+    // they manage attendance for others. Block them from clocking out.
+    if (req.user.role === 'admin' || req.user.role === 'super_admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admins and Super Admins cannot perform clock-out. This action is reserved for non-administrative roles.',
+      });
+    }
+
     const policy = await getAttendancePolicy();
     const shift = resolveUserShift(req.user, policy);
     const attendanceDate = getAttendanceDayForShift(shift, new Date());
@@ -210,6 +542,17 @@ exports.clockOut = async (req, res) => {
 
     if (!record || !record.clockInAt) {
       return res.status(400).json({ success: false, message: 'Clock in first before clocking out' });
+    }
+
+    // Keep the late-approval workflow intact: while a late check-in is still
+    // awaiting review, Clock Out is blocked (the UI hides the button too) so
+    // the "Pending Approval -> approve -> Clock Out" flow cannot be bypassed.
+    if (record.lateApprovalStatus === 'pending' && record.status === 'pending') {
+      return res.status(403).json({
+        success: false,
+        message: 'Your late check-in is awaiting approval. You can clock out once it is approved.',
+        code: 'LATE_APPROVAL_PENDING',
+      });
     }
 
     // if (record.clockOutAt) {
@@ -244,11 +587,15 @@ exports.clockOut = async (req, res) => {
     record.isHalfDay = halfDayInfo.isHalfDay;
     record.isEarlyCheckout = earlyCheckout.isEarlyCheckout;
     record.earlyCheckoutMinutes = earlyCheckout.earlyCheckoutMinutes;
-    record.status = record.isHalfDay
-      ? 'half_day'
-      : record.isLate
-        ? 'late'
-        : 'present';
+    // Keep the late-approval pending state intact until a reviewer decides;
+    // clocking out must not silently resolve a pending late check-in.
+    record.status = record.lateApprovalStatus === 'pending'
+      ? 'pending'
+      : record.isHalfDay
+        ? 'half_day'
+        : record.isLate
+          ? 'late'
+          : 'present';
     record.updatedBy = req.user._id;
 
     await record.save();
@@ -369,9 +716,16 @@ exports.getLeaveRequests = async (req, res) => {
 // @POST /api/attendance/leaves
 exports.applyLeave = async (req, res) => {
   try {
-    const { leaveType = 'annual', startDate, endDate, reason = '' } = req.body;
+    const { leaveType = 'annual', startDate, endDate, reason = '', notifyViaEmail = true } = req.body;
     if (!startDate || !endDate) {
       return res.status(400).json({ success: false, message: 'Start date and end date are required' });
+    }
+
+    // Validate date format
+    const startDateObj = new Date(startDate);
+    const endDateObj = new Date(endDate);
+    if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid date format. Please use YYYY-MM-DD format.' });
     }
 
     const start = getDayBounds(startDate).start;
@@ -391,23 +745,237 @@ exports.applyLeave = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Overlapping leave request already exists' });
     }
 
+    // Normalize the leave type (legacy values such as 'Half-Day'/'Personal
+    // Resion' are mapped to their canonical form) and pin half-day requests to
+    // a single day so the half-day counter stays accurate (0.5 day).
+    const normalizedLeaveType = normalizeLeaveType(leaveType);
+    const halfDayLeave = normalizedLeaveType === 'half_day';
+    let effectiveEnd = end;
+    if (halfDayLeave && toDateKey(end) !== toDateKey(start)) {
+      return res.status(400).json({
+        success: false,
+        message: 'A Half Day leave can only be requested for a single day. Set the end date equal to the start date.',
+      });
+    }
+    if (halfDayLeave) effectiveEnd = getDayBounds(start).end;
+
     const policy = await getAttendancePolicy();
-    const totalDays = calculateLeaveDayCount(start, end, policy);
+    const totalDays = halfDayLeave ? 0.5 : calculateLeaveDayCount(start, effectiveEnd, policy);
     const leave = await LeaveRequest.create({
       user: req.user._id,
-      leaveType,
+      leaveType: normalizedLeaveType,
       startDate: start,
-      endDate: end,
+      endDate: effectiveEnd,
       totalDays,
       reason,
       status: 'pending',
     });
 
+    // Send email notification to HR and Admin if requested
+    let emailSentTo = [];
+    if (notifyViaEmail) {
+      const hrAndAdminUsers = await User.find({
+        role: { $in: ['hr', 'admin', 'super_admin'] },
+        isActive: true,
+      }).select('name email _id');
+
+      const company = (await Settings.findOne().lean())?.branding?.appName || 'CRM Pro';
+      const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const emailPromises = hrAndAdminUsers.map(async (hrUser) => {
+        const result = await sendEmail({
+          to: hrUser.email,
+          // Hitting "Reply" in the mailbox reaches the requesting employee.
+          replyTo: req.user.email,
+          subject: `[${company}] Leave Request: ${req.user.name}`,
+          text: `
+============================================================
+           LEAVE REQUEST NOTIFICATION
+============================================================
+
+From: ${req.user.name} (${req.user.role})
+Company: ${company}
+
+------------------------------------------------------------
+                          DETAILS
+------------------------------------------------------------
+
+Leave Type:    ${leaveTypeLabel(normalizedLeaveType)}
+Start Date:    ${start.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+End Date:      ${effectiveEnd.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+Total Days:    ${totalDays} day(s)
+Status:        PENDING APPROVAL
+
+Reason:
+${reason ? reason : 'Not specified'}
+
+------------------------------------------------------------
+                    NOTICE
+------------------------------------------------------------
+
+This is an automated notification from ${company}.
+Please review this leave request and take appropriate action.
+
+============================================================
+          `,
+          html: `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }
+                .header h1 { margin: 0; font-size: 24px; }
+                .content { background: #f9f9f9; padding: 25px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0; }
+                .info-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+                .info-table td { padding: 12px 15px; border-bottom: 1px solid #e0e0e0; }
+                .info-table td:first-child { font-weight: bold; width: 150px; color: #555; background: #f0f0f0; }
+                .info-table td:last-child { color: #333; }
+                .status { display: inline-block; background: #fff3cd; color: #856404; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-top: 10px; }
+                .footer { text-align: center; margin-top: 25px; padding-top: 15px; border-top: 1px solid #e0e0e0; color: #888; font-size: 12px; }
+                .action-btn { display: inline-block; background: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 15px; }
+                .action-btn:hover { background: #4338ca; }
+              </style>
+            </head>
+            <body>
+              <div class="header">
+                <h1>📅 Leave Request</h1>
+                <p>New Leave Request Submitted</p>
+              </div>
+              <div class="content">
+                <p>Hello,</p>
+                <p>A new leave request has been submitted and requires your approval.</p>
+                
+                <table class="info-table">
+                  <tr>
+                    <td>Employee Name</td>
+                    <td><strong>${req.user.name}</strong></td>
+                  </tr>
+                  <tr>
+                    <td>Employee Role</td>
+                    <td>${req.user.role}</td>
+                  </tr>
+                  <tr>
+                    <td>Leave Type</td>
+                    <td><strong>${leaveTypeLabel(normalizedLeaveType)}</strong></td>
+                  </tr>
+                  <tr>
+                    <td>Start Date</td>
+                    <td>${start.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td>
+                  </tr>
+                  <tr>
+                    <td>End Date</td>
+                    <td>${effectiveEnd.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td>
+                  </tr>
+                  <tr>
+                    <td>Total Days</td>
+                    <td><strong>${totalDays} day(s)</strong></td>
+                  </tr>
+                  <tr>
+                    <td>Reason</td>
+                    <td>${reason ? reason : '<em>Not specified</em>'}</td>
+                  </tr>
+                </table>
+                
+                <div style="text-align: center;">
+                  <span class="status">⏳ Pending Approval</span>
+                </div>
+                
+                <p style="margin-top: 20px; text-align: center;">
+                  Please review this leave request and take appropriate action.
+                </p>
+
+                <div style="text-align: center;">
+                  <a class="action-btn" href="${frontendUrl}/attendance">Open Attendance &amp; Review</a>
+                </div>
+                <p style="margin-top: 10px; font-size: 12px; color: #888; text-align: center;">
+                  Sign in as HR / Admin / Super Admin, then click the employee name under
+                  &ldquo;Leave Requests&rdquo; to Approve or Reject this request.
+                </p>
+                <p style="margin-top: 4px; font-size: 12px; color: #888; text-align: center;">
+                  You can also simply reply to this email to reach ${req.user.name}
+                  (${req.user.email}) directly.
+                </p>
+              </div>
+              <div class="footer">
+                <p>This is an automated notification from <strong>${company}</strong></p>
+                <p>Please do not reply to this email.</p>
+              </div>
+            </body>
+            </html>
+          `,
+        });
+
+        return {
+          recipient: hrUser._id,
+          email: hrUser.email,
+          sentAt: new Date(),
+          delivered: result.sent,
+        };
+      });
+
+      emailSentTo = await Promise.all(emailPromises);
+
+      // Update the leave request with email notification records
+      await LeaveRequest.findByIdAndUpdate(leave._id, {
+        emailSentTo,
+      });
+    }
+
+    const populated = await LeaveRequest.findById(leave._id)
+      .populate('user', 'name email role department')
+      .populate('reviewedBy', 'name email role')
+      .populate('emailSentTo.recipient', 'name email role');
+
+    res.status(201).json({ 
+      success: true, 
+      leave: populated,
+      emailSent: emailSentTo.length > 0,
+      emailsSentTo: emailSentTo.map(e => e.email),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @PUT /api/attendance/leaves/:id/cancel
+// Cancel a pending leave request
+exports.cancelLeaveRequest = async (req, res) => {
+  try {
+    const leave = await LeaveRequest.findById(req.params.id);
+    if (!leave) {
+      return res.status(404).json({ success: false, message: 'Leave request not found' });
+    }
+
+    // Only the requester or admin/HR/super_admin can cancel
+    const isRequester = String(leave.user) === String(req.user._id);
+    const isAdmin = ['admin', 'super_admin', 'hr'].includes(req.user.role);
+
+    if (!isRequester && !isAdmin) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You are not authorized to cancel this leave request' 
+      });
+    }
+
+    // Only pending requests can be cancelled
+    if (leave.status !== 'pending') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Only pending leave requests can be cancelled' 
+      });
+    }
+
+    // Update status to cancelled
+    leave.status = 'cancelled';
+    await leave.save();
+
     const populated = await LeaveRequest.findById(leave._id)
       .populate('user', 'name email role department')
       .populate('reviewedBy', 'name email role');
 
-    res.status(201).json({ success: true, leave: populated });
+    res.json({ success: true, leave: populated, message: 'Leave request cancelled successfully' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -435,21 +1003,220 @@ exports.reviewLeave = async (req, res) => {
     leave.reviewedAt = new Date();
     await leave.save();
 
+    // Half-day leave types must land in the "Half Days" box; every other
+    // approved leave feeds the "On Leave" box. Both stay flagged as on-leave so
+    // the "Absent" box never double-counts the same day.
+    const halfDayLeave = isHalfDayLeaveType(leave.leaveType) || Number(leave.totalDays) === 0.5;
+    const leaveRecordStatus = halfDayLeave ? 'half_day' : 'leave';
+
     if (status === 'approved') {
       const leaveUser = await User.findById(leave.user).select('_id shiftCode role');
+      
+      // Run full reconciliation for historical dates
       await reconcileMissingAttendanceRecords({
         users: leaveUser ? [leaveUser] : [],
         startDate: leave.startDate,
         endDate: leave.endDate,
         actedBy: req.user._id,
       });
+      
+      // Also update any existing attendance records within the leave date range
+      // that might have been created today or for future dates (which the
+      // reconciliation function skips)
+      const leaveStart = getDayBounds(leave.startDate).start;
+      const leaveEnd = getDayBounds(leave.endDate).end;
+      
+      // Every record already present in the period (clocked-in days included) so
+      // the sync loop below never overwrites a day the employee actually worked.
+      const allRecords = await AttendanceRecord.find({
+        user: leave.user,
+        attendanceDate: { $gte: leaveStart, $lte: leaveEnd },
+      }).select('_id attendanceDate clockInAt status');
+
+      const recordedDayKeys = new Set(
+        allRecords.map((r) => getDayBounds(r.attendanceDate).start.getTime())
+      );
+
+      // Auto-marked 'absent' records (and stale leave/half-day ones) with no
+      // clock-in are converted so the day lands in the right dashboard box.
+      const existingRecords = allRecords.filter(
+        (r) => !r.clockInAt && ['absent', 'not_clocked_in', 'leave', 'half_day'].includes(r.status)
+      );
+
+      for (const record of existingRecords) {
+        record.status = leaveRecordStatus;
+        record.isOnLeave = true;
+        record.isAbsent = false;
+        record.isHalfDay = halfDayLeave;
+        record.leaveRequest = leave._id;
+        record.updatedBy = req.user._id;
+        await record.save();
+      }
+
+      // Days inside the leave period that have no attendance record yet are
+      // created now, because reconciliation skips today/future dates and honours
+      // the auto-mark setting - an approved request must always materialise them
+      // so the Half Days / On Leave counters pick the day up.
+      const leaveDays = enumerateDays(leave.startDate, leave.endDate);
+      const daysNeedingSync = leaveDays.filter(
+        (day) => !recordedDayKeys.has(getDayBounds(day).start.getTime())
+      );
+
+      if (daysNeedingSync.length > 0) {
+        const policy = await getAttendancePolicy();
+
+        for (const day of daysNeedingSync) {
+          // Weekly offs and holidays keep their own status instead of "leave".
+          if (isWeeklyOff(day, policy) || getHolidayForDate(day, policy)) continue;
+
+          const dayStart = getDayBounds(day).start;
+          const shift = resolveUserShift(leaveUser, policy);
+          try {
+            await AttendanceRecord.create({
+              user: leave.user,
+              attendanceDate: dayStart,
+              status: leaveRecordStatus,
+              isLate: false,
+              isHalfDay: halfDayLeave,
+              lateMinutes: 0,
+              isEarlyCheckout: false,
+              earlyCheckoutMinutes: 0,
+              shiftCode: shift.code,
+              shiftName: shift.name,
+              isAbsent: false,
+              isOnLeave: true,
+              leaveRequest: leave._id,
+              isHoliday: false,
+              holidayName: '',
+              note: '',
+              createdBy: req.user._id,
+              updatedBy: req.user._id,
+            });
+          } catch (createErr) {
+            // Unique index (user + attendanceDate) raced with another writer -
+            // the records for that day already exist, so counters are correct.
+            if (createErr.code !== 11000) throw createErr;
+          }
+        }
+      }
     }
+
+    // Let the requester know the outcome (in-app notification + email). For a
+    // rejection the reviewer's reason is always forwarded to the employee so
+    // they know exactly why the request was declined.
+    const decisionLabel = {
+      approved: 'Approved',
+      rejected: 'Rejected',
+      cancelled: 'Cancelled',
+    }[status] || status;
+    const reviewerLine = `${req.user.name} (${req.user.role})`;
+    const typeLabel = leaveTypeLabel(leave.leaveType);
+    const periodLabel = `${new Date(leave.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} to ${new Date(leave.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    const noteText = String(reviewNote || '').trim();
+
+    try {
+      await notifyUser({
+        recipientId: leave.user,
+        senderId: req.user._id,
+        type: status === 'approved' ? 'leave_approved' : 'leave_rejected',
+        title: `Leave request ${decisionLabel.toLowerCase()}`,
+        message:
+          `Your ${typeLabel} request for ${periodLabel} was ${decisionLabel.toLowerCase()} by ${reviewerLine}.` +
+          (noteText ? ` Reason: ${noteText}` : ''),
+        link: '/attendance/leaves',
+      });
+    } catch (notifyErr) {
+      console.error('Leave review notification failed:', notifyErr.message);
+    }
+
+    await sendLeaveReviewEmail({
+      leave,
+      requesterId: leave.user,
+      status,
+      decisionLabel,
+      reviewerLine,
+      typeLabel,
+      noteText,
+    });
+
 
     const populated = await LeaveRequest.findById(leave._id)
       .populate('user', 'name email role department')
       .populate('reviewedBy', 'name email role');
 
     res.json({ success: true, leave: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @GET /api/attendance/leaves/emails
+// Get all leave request emails sent by users (for Admin/HR to view)
+exports.getLeaveRequestEmails = async (req, res) => {
+  try {
+    const { page = 1, limit = 50, startDate, endDate, status } = req.query;
+    
+    // Only Admin, HR, and Super Admin can view emails
+    if (!['super_admin', 'admin', 'hr'].includes(req.user.role)) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only Admin, HR, and Super Admin can view leave request emails' 
+      });
+    }
+
+    const query = {
+      'emailSentTo.recipient': { $exists: true, $ne: [] },
+    };
+
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    if (status) {
+      query.status = status;
+    }
+
+    const leaves = await LeaveRequest.find(query)
+      .populate('user', 'name email role department')
+      .populate('reviewedBy', 'name email role')
+      .populate('emailSentTo.recipient', 'name email role')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(Number(limit));
+
+    const total = await LeaveRequest.countDocuments(query);
+
+    // Format the response to show email details
+    const emails = leaves.map(leave => ({
+      leaveId: leave._id,
+      employee: leave.user,
+      leaveType: leave.leaveType,
+      startDate: leave.startDate,
+      endDate: leave.endDate,
+      totalDays: leave.totalDays,
+      reason: leave.reason,
+      status: leave.status,
+      submittedAt: leave.createdAt,
+      reviewedBy: leave.reviewedBy,
+      reviewedAt: leave.reviewedAt,
+      reviewNote: leave.reviewNote,
+      emailsSent: leave.emailSentTo.map(email => ({
+        recipient: email.recipient,
+        email: email.email,
+        sentAt: email.sentAt,
+        delivered: email.delivered,
+      })),
+    }));
+
+    res.json({ 
+      success: true, 
+      total,
+      emails,
+      page: Number(page),
+      limit: Number(limit),
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -478,6 +1245,110 @@ exports.reconcileAttendance = async (req, res) => {
     });
 
     res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @GET /api/attendance/late-checkins
+// Pending late check-ins the current user is allowed to review, based on the
+// requester's role (HR/Manager late check-ins are only visible to Super Admin
+// and Admin; regular staff's to Admin/HR/Manager as well).
+exports.getLateCheckIns = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const approverRole = req.user.role;
+    if (!['super_admin', 'admin', 'hr', 'manager'].includes(approverRole)) {
+      return res.status(403).json({ success: false, message: 'You are not allowed to review late check-ins' });
+    }
+
+    const query = {
+      lateApprovalStatus: 'pending',
+      status: 'pending',
+    };
+    if (startDate || endDate) {
+      query.attendanceDate = {};
+      if (startDate) query.attendanceDate.$gte = getDayBounds(startDate).start;
+      if (endDate) query.attendanceDate.$lte = getDayBounds(endDate).end;
+    }
+
+    // Pull the pending records, then filter by what this approver may review.
+    const pending = await AttendanceRecord.find(query)
+      .populate('user', 'name email avatar role department shiftCode')
+      .populate('lateReviewedBy', 'name email role')
+      .sort({ attendanceDate: -1 });
+
+    const records = pending.filter((record) => {
+      const requesterRole = record.user?.role || 'team_member';
+      // Super Admin sees everything pending (including other Super Admins' if
+      // somehow present). Everyone else is limited by the routing matrix.
+      if (approverRole === 'super_admin') return true;
+      return canApproveLateCheckIn(approverRole, requesterRole) && String(record.user?._id) !== String(req.user._id);
+    });
+
+    res.json({ success: true, records, total: records.length });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @PUT /api/attendance/late-checkins/:id/review
+// Approve or reject a pending late check-in. The requester is notified with
+// the reviewer's details (name + role) and optional review note.
+exports.reviewLateCheckIn = async (req, res) => {
+  try {
+    const { decision, reviewNote = '' } = req.body;
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ success: false, message: 'decision must be approved or rejected' });
+    }
+
+    const record = await AttendanceRecord.findById(req.params.id).populate('user', 'name email role');
+    if (!record) {
+      return res.status(404).json({ success: false, message: 'Attendance record not found' });
+    }
+    if (record.lateApprovalStatus !== 'pending' || record.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'This late check-in has already been reviewed' });
+    }
+
+    const requesterRole = record.user?.role || 'team_member';
+    if (!canApproveLateCheckIn(req.user.role, requesterRole)) {
+      return res.status(403).json({
+        success: false,
+        message: `A ${requesterRole}'s late check-in must be approved by ${getApproversForRequester(requesterRole).join(' or ')}`,
+      });
+    }
+
+    // Prevent reviewing your own pending late check-in.
+    if (String(record.user?._id) === String(req.user._id)) {
+      return res.status(403).json({ success: false, message: 'You cannot review your own late check-in' });
+    }
+
+    record.lateApprovalStatus = decision;
+    record.lateReviewedBy = req.user._id;
+    record.lateReviewedAt = new Date();
+    record.lateReviewNote = String(reviewNote || '').slice(0, 500);
+    // Approved -> normal 'late' status; rejected -> treated as absent.
+    record.status = decision === 'approved' ? 'late' : 'absent';
+    record.isAbsent = decision === 'rejected';
+    record.updatedBy = req.user._id;
+    await record.save();
+
+    // Notify the requester with the approver's details included.
+    const reviewDateLabel = formatApprovalDate(new Date());
+    await notifyUser({
+      recipientId: record.user._id,
+      senderId: req.user._id,
+      type: decision === 'approved' ? 'late_checkin_approved' : 'late_checkin_rejected',
+      title: decision === 'approved' ? 'Late check-in approved' : 'Late check-in rejected',
+      message: `Your late check-in on ${formatApprovalDate(record.attendanceDate)} was ${decision} by ${req.user.name} (${req.user.role}).${record.lateReviewNote ? ` Note: ${record.lateReviewNote}` : ''} — reviewed on ${reviewDateLabel}`,
+      link: '/attendance',
+    });
+
+    const populated = await AttendanceRecord.findById(record._id)
+      .populate('user', 'name email avatar role department shiftCode')
+      .populate('lateReviewedBy', 'name email role');
+
+    res.json({ success: true, record: populated });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

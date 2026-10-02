@@ -51,6 +51,36 @@ const attendanceHolidaySchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Recurring monthly off pattern, e.g. "2nd Saturday of every month is off".
+// weekOfMonth: 1-4 = nth occurrence of dayOfWeek in the month, 5 = last occurrence.
+// dayOfWeek: 0 = Sunday ... 6 = Saturday (same numbering as weeklyOffDays).
+const attendanceMonthlyOffRuleSchema = new mongoose.Schema(
+  {
+    weekOfMonth: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 5,
+      validate: {
+        validator: (n) => Number.isInteger(n) && n >= 1 && n <= 5,
+        message: 'weekOfMonth must be 1-5 (5 = last occurrence of the day in the month)',
+      },
+    },
+    dayOfWeek: {
+      type: Number,
+      required: true,
+      min: 0,
+      max: 6,
+      validate: {
+        validator: (n) => Number.isInteger(n) && n >= 0 && n <= 6,
+        message: 'dayOfWeek must be between 0 (Sunday) and 6 (Saturday)',
+      },
+    },
+    name: { type: String, default: '', trim: true, maxlength: 80 },
+  },
+  { _id: false }
+);
+
 const attendancePolicySchema = new mongoose.Schema(
   {
     defaultShiftCode: { type: String, default: 'general' },
@@ -77,6 +107,8 @@ const attendancePolicySchema = new mongoose.Schema(
       ]),
     },
     holidays: { type: [attendanceHolidaySchema], default: [] },
+    // Recurring "nth weekday of the month" off rules (e.g. 2nd Saturday off).
+    monthlyOffRules: { type: [attendanceMonthlyOffRuleSchema], default: [] },
     autoMarkEnabled: { type: Boolean, default: true },
     // Desktop Activity Tracker (working-hours tracking) settings — managed by
     // admins here and read-only inside the desktop app.
