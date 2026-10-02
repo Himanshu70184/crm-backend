@@ -6,7 +6,7 @@ const DEFAULT_SHIFT = {
   code: 'general',
   name: 'General Shift',
   startTime: '09:30',
-  endTime: '18:30',
+  endTime: '06:00',
   graceMinutes: 0,
   halfDayMinutes: 240,
   isOvernight: false,
@@ -58,6 +58,17 @@ function normalizeShift(raw = {}) {
   };
 }
 
+function normalizeMonthlyOffRules(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((rule) => ({
+      weekOfMonth: Math.min(5, Math.max(1, Math.round(Number(rule?.weekOfMonth)) || 1)),
+      dayOfWeek: Math.min(6, Math.max(0, Math.round(Number(rule?.dayOfWeek)) || 0)),
+      name: String(rule?.name || '').trim().slice(0, 80),
+    }))
+    .filter((rule) => Number.isInteger(rule.weekOfMonth) && Number.isInteger(rule.dayOfWeek));
+}
+
 function normalizeAttendancePolicy(raw = {}) {
   const shifts = Array.isArray(raw.shifts) && raw.shifts.length
     ? raw.shifts.map((s) => normalizeShift(s))
@@ -88,6 +99,7 @@ function normalizeAttendancePolicy(raw = {}) {
     shifts,
     weeklyOffDays,
     holidays,
+    monthlyOffRules: normalizeMonthlyOffRules(raw.monthlyOffRules),
     autoMarkEnabled: raw.autoMarkEnabled !== false,
     idleTimeoutMinutes: Math.max(1, Math.min(120, Number(raw.idleTimeoutMinutes) || 5)),
   };
@@ -111,7 +123,12 @@ function getShiftWindowForAttendanceDay(attendanceDate, shift) {
   const startAt = combineDateAndTime(attendanceDate, shift.startTime);
   let endAt = combineDateAndTime(attendanceDate, shift.endTime);
 
-  if (shift.isOvernight || endAt <= startAt) {
+  // Roll the end across midnight ONLY when the configured times actually cross
+  // midnight (end <= start). A bare isOvernight flag on a shift whose end time
+  // is later the same day (e.g. 15:30 -> 23:30 marked overnight) used to create
+  // a 32-hour window, which made "yesterday's shift" absorb next-morning
+  // clock-ins and mis-date their attendance records (Today card + log empty).
+  if (endAt <= startAt) {
     endAt = new Date(endAt.getTime() + 24 * 60 * 60 * 1000);
   }
 
@@ -173,6 +190,34 @@ function isWeeklyOff(dateInput, policy) {
   return policy.weeklyOffDays.includes(day);
 }
 
+// Matches a date against the recurring "nth weekday of the month" off rules.
+// weekOfMonth 1-4 = nth occurrence of that weekday in the month, 5 = last
+// occurrence (handles months where the 5th occurrence doesn't exist).
+// Returns the matching rule or null.
+function getMonthlyOffRuleForDate(dateInput, policy) {
+  const rules = Array.isArray(policy?.monthlyOffRules) ? policy.monthlyOffRules : [];
+  if (rules.length === 0) return null;
+
+  const date = new Date(dateInput);
+  const dayOfWeek = date.getDay();
+  const dayOfMonth = date.getDate();
+  const daysInMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  const occurrence = Math.ceil(dayOfMonth / 7); // 1st/2nd/3rd/4th/5th of this weekday
+  const isLastOccurrence = dayOfMonth + 7 > daysInMonth; // no same weekday later in this month
+
+  return (
+    rules.find((rule) => {
+      if (rule.dayOfWeek !== dayOfWeek) return false;
+      if (Number(rule.weekOfMonth) >= 5) return isLastOccurrence;
+      return Number(rule.weekOfMonth) === occurrence;
+    }) || null
+  );
+}
+
+function isMonthlyOff(dateInput, policy) {
+  return Boolean(getMonthlyOffRuleForDate(dateInput, policy));
+}
+
 function getHolidayForDate(dateInput, policy) {
   const key = toDateKey(dateInput);
   return policy.holidays.find((h) => toDateKey(h.date) === key) || null;
@@ -188,22 +233,32 @@ function enumerateDays(startDateInput, endDateInput) {
   return days;
 }
 
+// Half-day leave types are stored as 'half_day' (legacy: 'Half-Day', 'Half
+// Day', 'halfday'). Approved half-day leaves must be materialised as
+// `half_day` attendance records so the dashboard's "Half Days" box counts
+// them (a full-day leave stays as `leave` and feeds the "On Leave" box).
+function isHalfDayLeaveType(rawType = '') {
+  const key = String(rawType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return key === 'half_day' || key === 'halfday';
+}
+
 async function buildApprovedLeaveDayMap(userIds, startDate, endDate) {
   const rows = await LeaveRequest.find({
     user: { $in: userIds },
     status: 'approved',
     startDate: { $lte: getDayBounds(endDate).end },
     endDate: { $gte: getDayBounds(startDate).start },
-  }).select('user startDate endDate _id');
+  }).select('user startDate endDate _id leaveType totalDays');
 
   const leaveMap = new Map();
   for (const row of rows) {
     const userId = String(row.user);
+    const halfDay = isHalfDayLeaveType(row.leaveType) || Number(row.totalDays) === 0.5;
     const days = enumerateDays(row.startDate, row.endDate);
     for (const day of days) {
       const key = `${userId}:${toDateKey(day)}`;
       if (!leaveMap.has(key)) {
-        leaveMap.set(key, String(row._id));
+        leaveMap.set(key, { leaveRequest: String(row._id), halfDay });
       }
     }
   }
@@ -212,26 +267,33 @@ async function buildApprovedLeaveDayMap(userIds, startDate, endDate) {
 
 function deriveAutoStatus({ day, policy, leaveMap, userId }) {
   const holiday = getHolidayForDate(day, policy);
-  if (holiday || isWeeklyOff(day, policy)) {
+  const monthlyOff = getMonthlyOffRuleForDate(day, policy);
+  if (holiday || isWeeklyOff(day, policy) || monthlyOff) {
     return {
       status: 'holiday',
       isHoliday: true,
-      holidayName: holiday?.name || 'Weekly Off',
+      holidayName: holiday?.name || monthlyOff?.name || 'Weekly Off',
       isOnLeave: false,
       isAbsent: false,
+      isHalfDay: false,
       leaveRequest: null,
     };
   }
 
-  const leaveRequest = leaveMap.get(`${userId}:${toDateKey(day)}`) || null;
-  if (leaveRequest) {
+  const leaveEntry = leaveMap.get(`${userId}:${toDateKey(day)}`) || null;
+  if (leaveEntry) {
+    const leaveRequestId = typeof leaveEntry === 'string' ? leaveEntry : leaveEntry.leaveRequest;
+    const halfDay = typeof leaveEntry === 'object' && Boolean(leaveEntry.halfDay);
     return {
-      status: 'leave',
+      // Approved half-day leave -> 'half_day' so it lands in the "Half Days"
+      // box; a full-day leave -> 'leave' (the "On Leave" box).
+      status: halfDay ? 'half_day' : 'leave',
       isHoliday: false,
       holidayName: '',
       isOnLeave: true,
       isAbsent: false,
-      leaveRequest,
+      isHalfDay: halfDay,
+      leaveRequest: leaveRequestId,
     };
   }
 
@@ -241,6 +303,7 @@ function deriveAutoStatus({ day, policy, leaveMap, userId }) {
     holidayName: '',
     isOnLeave: false,
     isAbsent: true,
+    isHalfDay: false,
     leaveRequest: null,
   };
 }
@@ -307,7 +370,7 @@ async function reconcileMissingAttendanceRecords({
           attendanceDate: getDayBounds(day).start,
           status: desired.status,
           isLate: false,
-          isHalfDay: false,
+          isHalfDay: Boolean(desired.isHalfDay),
           lateMinutes: 0,
           isEarlyCheckout: false,
           earlyCheckoutMinutes: 0,
@@ -330,6 +393,7 @@ async function reconcileMissingAttendanceRecords({
         existingRecord.status !== desired.status
         || Boolean(existingRecord.isAbsent) !== desired.isAbsent
         || Boolean(existingRecord.isOnLeave) !== desired.isOnLeave
+        || Boolean(existingRecord.isHalfDay) !== Boolean(desired.isHalfDay)
         || Boolean(existingRecord.isHoliday) !== desired.isHoliday
         || String(existingRecord.holidayName || '') !== String(desired.holidayName || '')
         || String(existingRecord.leaveRequest || '') !== String(desired.leaveRequest || '')
@@ -339,6 +403,7 @@ async function reconcileMissingAttendanceRecords({
         existingRecord.status = desired.status;
         existingRecord.isAbsent = desired.isAbsent;
         existingRecord.isOnLeave = desired.isOnLeave;
+        existingRecord.isHalfDay = Boolean(desired.isHalfDay);
         existingRecord.isHoliday = desired.isHoliday;
         existingRecord.holidayName = desired.holidayName;
         existingRecord.leaveRequest = desired.leaveRequest;
@@ -356,7 +421,7 @@ function calculateLeaveDayCount(startDate, endDate, policy) {
   const days = enumerateDays(startDate, endDate);
   let total = 0;
   for (const day of days) {
-    if (isWeeklyOff(day, policy)) continue;
+    if (isWeeklyOff(day, policy) || isMonthlyOff(day, policy)) continue;
     if (getHolidayForDate(day, policy)) continue;
     total += 1;
   }
@@ -374,6 +439,11 @@ module.exports = {
   computeHalfDayInfo,
   computeEarlyCheckoutInfo,
   enumerateDays,
+  isWeeklyOff,
+  getMonthlyOffRuleForDate,
+  isMonthlyOff,
+  getHolidayForDate,
+  deriveAutoStatus,
   calculateLeaveDayCount,
   reconcileMissingAttendanceRecords,
 };

@@ -45,13 +45,31 @@ async function disposeConversationIfEmpty(conversation) {
   // list is empty — they persist until the user explicitly clears them.
   if (conversation.type === 'self') return false;
   if ((conversation.participants || []).length > 0) return false;
+  // Users who left the group still keep read-only access to the history, so
+  // don't dispose the conversation while any of them are keeping it.
+  if ((conversation.leftUsers || []).length > 0) return false;
   await disposeConversation(conversation._id);
   return true;
 }
 
+// TRUE when the user has read-only "left the group" access: they appear in
+// leftUsers AND are no longer an active participant. Active members return
+// false here (they have full access instead).
+function hasLeftAccess(req, conversation) {
+  const userId = String(req.user._id);
+  const isParticipant = (conversation.participants || []).some((p) => String(p?._id || p) === userId);
+  if (isParticipant) return false;
+  return (conversation.leftUsers || []).some((l) => String(l.user?._id || l.user) === userId);
+}
+
 async function cleanupZeroMemberConversations() {
-  // Skip self-type conversations — they are intentionally single-participant
-  const empties = await ChatConversation.find({ participants: { $size: 0 }, type: { $ne: 'self' } }).select('_id');
+  // Skip self-type conversations — they are intentionally single-participant.
+  // Also skip conversations where left users are still keeping the history.
+  const empties = await ChatConversation.find({
+    participants: { $size: 0 },
+    type: { $ne: 'self' },
+    'leftUsers.0': { $exists: false },
+  }).select('_id');
   if (!empties.length) return 0;
   const ids = empties.map((item) => item._id);
   await ChatMessage.deleteMany({ conversation: { $in: ids } });
@@ -173,7 +191,15 @@ exports.getConversations = async (req, res) => {
     // Normal Chat page: everyone (including admin/super_admin) only sees
     // conversations they are actually a participant of. Full oversight is
     // available separately via getAllConversationsAdmin below.
-    const query = { isArchived: false, participants: req.user._id };
+    // Groups the user previously LEFT are also included so the chat history
+    // stays visible (read-only) until the user explicitly deletes it.
+    const query = {
+      isArchived: false,
+      $or: [
+        { participants: req.user._id },
+        { leftUsers: { $elemMatch: { user: req.user._id } } },
+      ],
+    };
 
     const total = await ChatConversation.countDocuments(query);
 
@@ -196,9 +222,14 @@ exports.getConversations = async (req, res) => {
       .limit(limit)
       .lean();
 
-    // Dispose conversations that have no resolvable participants (e.g. dangling user refs).
+    // Dispose conversations that have no resolvable participants (e.g. dangling user refs),
+    // UNLESS left users are still keeping the history.
     const disposedIds = conversations
-      .filter((c) => !Array.isArray(c.participants) || c.participants.length === 0)
+      .filter(
+        (c) =>
+          (!Array.isArray(c.participants) || c.participants.length === 0) &&
+          (!Array.isArray(c.leftUsers) || c.leftUsers.length === 0)
+      )
       .map((c) => c._id);
 
     if (disposedIds.length) {
@@ -218,8 +249,25 @@ exports.getConversations = async (req, res) => {
         })
       : validConversations;
 
+    // Flag conversations the current user has left (read-only history view).
+    // Active participants are always flagged false, even if they appear in
+    // leftUsers from a previous leave + rejoin.
+    const userIdStr = String(req.user._id);
+    filtered.forEach((c) => {
+      const isParticipant = (c.participants || []).some((p) => String(p?._id || p) === userIdStr);
+      const hasLeft = (c.leftUsers || []).some((l) => String(l.user?._id || l.user) === userIdStr);
+      c.isLeft = hasLeft && !isParticipant;
+      c.unreadCount = c.isLeft ? 0 : c.unreadCount;
+    });
+
 await attachLastMessages(filtered);
     await attachUnreadCounts(filtered, req.user._id);
+
+    // Re-apply the left flags after attach helpers (they mutate the same docs;
+    // this keeps unreadCount forced to 0 for left conversations).
+    filtered.forEach((c) => {
+      if (c.isLeft) c.unreadCount = 0;
+    });
 
     res.json({
       success: true,
@@ -252,11 +300,11 @@ exports.getConversationById = async (req, res) => {
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!isConversationMember(req, conversation)) {
+    if (!isConversationMember(req, conversation) && !hasLeftAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
-    res.json({ success: true, conversation });
+    res.json({ success: true, conversation, isLeft: hasLeftAccess(req, conversation) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -490,6 +538,16 @@ exports.addMembers = async (req, res) => {
     }
 
     conversation.participants.push(...newIds);
+    // If any added user had previously left the group, clear their "left"
+    // entry so they get full (not read-only) access again.
+    if (conversation.leftUsers?.length) {
+      const newIdSet = new Set(newIds);
+      const before = conversation.leftUsers.length;
+      conversation.leftUsers = conversation.leftUsers.filter(
+        (l) => !newIdSet.has(String(l.user?._id || l.user))
+      );
+      if (conversation.leftUsers.length !== before) conversation.markModified('leftUsers');
+    }
     await conversation.save();
 
     const populated = await ChatConversation.findById(conversation._id)
@@ -548,6 +606,14 @@ exports.removeMember = async (req, res) => {
 
     conversation.participants = conversation.participants.filter((p) => String(p) !== String(userId));
     conversation.admins = remainingAdmins;
+
+    // A removed member keeps read-only access to the history (same as leaving),
+    // until they delete the chat themselves.
+    if (!conversation.leftUsers) conversation.leftUsers = [];
+    if (!conversation.leftUsers.some((l) => String(l.user?._id || l.user) === String(userId))) {
+      conversation.leftUsers.push({ user: userId, leftAt: new Date() });
+    }
+    conversation.markModified('leftUsers');
 
     const disposed = await disposeConversationIfEmpty(conversation);
     if (!disposed) {
@@ -668,6 +734,21 @@ exports.leaveConversation = async (req, res) => {
       conversation.admins = [conversation.participants[0]];
     }
 
+    // Remember that this user left (and when) so they keep READ-ONLY access to
+    // the chat history until they explicitly delete it (DELETE /:id/left).
+    if (!conversation.leftUsers) conversation.leftUsers = [];
+    const alreadyLeft = conversation.leftUsers.some(
+      (l) => String(l.user?._id || l.user) === String(req.user._id)
+    );
+    if (!alreadyLeft) {
+      conversation.leftUsers.push({ user: req.user._id, leftAt: new Date() });
+    } else {
+      // Update the timestamp in case they left → rejoined → left again.
+      conversation.leftUsers = conversation.leftUsers.map((l) =>
+        String(l.user?._id || l.user) === String(req.user._id) ? { ...l, leftAt: new Date() } : l
+      );
+    }
+
     const disposed = await disposeConversationIfEmpty(conversation);
     if (!disposed) {
       await conversation.save();
@@ -698,6 +779,51 @@ exports.leaveConversation = async (req, res) => {
   }
 };
 
+// DELETE /api/chat/conversations/:id/left
+// The user permanently removes a group THEY HAVE LEFT from their chat list.
+// This clears their leftUsers entry; if no active participants and no other
+// left users are keeping the history, the conversation and its messages are
+// deleted entirely. Active members cannot use this — they'd use leave instead.
+exports.deleteLeftConversation = async (req, res) => {
+  try {
+    const conversation = await ChatConversation.findById(req.params.id);
+    if (!conversation || conversation.isArchived) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+    if (!hasLeftAccess(req, conversation)) {
+      return res.status(400).json({
+        success: false,
+        message: 'You can only delete a chat you have left. Use "Leave Chat" first.',
+      });
+    }
+
+    const userIdStr = String(req.user._id);
+    conversation.leftUsers = (conversation.leftUsers || []).filter(
+      (l) => String(l.user?._id || l.user) !== userIdStr
+    );
+    conversation.markModified('leftUsers');
+
+    // Nobody left keeping it: wipe the conversation and its messages.
+    if ((conversation.participants || []).length === 0 && conversation.leftUsers.length === 0) {
+      await disposeConversation(conversation._id);
+      emitUsersEvent([userIdStr], 'chat:conversation-updated', {
+        conversationId: String(conversation._id),
+        reason: 'conversation_disposed',
+      });
+      return res.json({ success: true, deleted: true, message: 'Chat deleted' });
+    }
+
+    await conversation.save();
+    emitUsersEvent([userIdStr], 'chat:conversation-updated', {
+      conversationId: String(conversation._id),
+      reason: 'left_history_deleted',
+    });
+    res.json({ success: true, deleted: true, message: 'Chat removed from your list' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // GET /api/chat/conversations/:id/messages
 // Returns a page of the most-recent messages (newest first, then reversed to
 // chronological order for display). Optionally pass `before` to load older
@@ -705,14 +831,16 @@ exports.leaveConversation = async (req, res) => {
 exports.getMessages = async (req, res) => {
   try {
     const { before, limit = 10 } = req.query;
-    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    // NOTE: leftUsers must be included in the projection — hasLeftAccess()
+    // reads it to grant read-only history access to users who left the group.
+    const conversation = await ChatConversation.findById(req.params.id).select('participants leftUsers isArchived');
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!isConversationMember(req, conversation)) {
+    if (!isConversationMember(req, conversation) && !hasLeftAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
@@ -744,14 +872,14 @@ exports.getMessages = async (req, res) => {
 // GET /api/chat/conversations/:id/messages/count
 exports.getMessageCount = async (req, res) => {
   try {
-    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    const conversation = await ChatConversation.findById(req.params.id).select('participants leftUsers isArchived');
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!isConversationMember(req, conversation)) {
+    if (!isConversationMember(req, conversation) && !hasLeftAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 
@@ -894,14 +1022,14 @@ res.status(201).json({ success: true, message: populated });
 // server-tracked unread count to 0. Called when the user opens a chat.
 exports.markConversationRead = async (req, res) => {
   try {
-    const conversation = await ChatConversation.findById(req.params.id).select('participants isArchived');
+    const conversation = await ChatConversation.findById(req.params.id).select('participants leftUsers isArchived');
     if (conversation && await disposeConversationIfEmpty(conversation)) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
     if (!conversation || conversation.isArchived) {
       return res.status(404).json({ success: false, message: 'Conversation not found' });
     }
-    if (!isConversationMember(req, conversation)) {
+    if (!isConversationMember(req, conversation) && !hasLeftAccess(req, conversation)) {
       return res.status(403).json({ success: false, message: 'Not allowed to view this conversation' });
     }
 

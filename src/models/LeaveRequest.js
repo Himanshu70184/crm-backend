@@ -5,7 +5,20 @@ const leaveRequestSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     leaveType: {
       type: String,
-      enum: ['annual', 'sick', 'casual', 'unpaid', 'other'],
+      // Canonical values are snake_case; the legacy spellings are kept so
+      // existing rows keep validating. New writes always use the canonical set.
+      enum: [
+        'annual',
+        'sick',
+        'casual',
+        'half_day',
+        'personal',
+        'unpaid',
+        'other',
+        // legacy values
+        'Half-Day',
+        'Personal Resion',
+      ],
       default: 'annual',
     },
     startDate: { type: Date, required: true },
@@ -20,6 +33,16 @@ const leaveRequestSchema = new mongoose.Schema(
     reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     reviewedAt: { type: Date, default: null },
     reviewNote: { type: String, default: '' },
+    // Email notification tracking
+    emailSentTo: {
+      type: [{
+        recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        email: { type: String },
+        sentAt: { type: Date, default: Date.now },
+        delivered: { type: Boolean, default: true },
+      }],
+      default: [],
+    },
   },
   { timestamps: true }
 );

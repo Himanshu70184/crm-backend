@@ -10,6 +10,7 @@ const {
   removeMember,
   setAdmin,
   leaveConversation,
+  deleteLeftConversation,
   getMessages,
   getMessageCount,
   updateConversation,
@@ -38,6 +39,8 @@ router.post('/conversations/:id/members', checkPermission('chat', 'update'), add
 router.delete('/conversations/:id/members/:userId', checkPermission('chat', 'update'), removeMember);
 router.put('/conversations/:id/admins/:userId', checkPermission('chat', 'update'), setAdmin);
 router.post('/conversations/:id/leave', checkPermission('chat', 'read'), leaveConversation);
+// Permanently removes a group the current user has LEFT from their chat list.
+router.delete('/conversations/:id/left', checkPermission('chat', 'read'), deleteLeftConversation);
 router.get('/conversations/:id/messages/count', checkPermission('chat', 'read'), getMessageCount);
 router.get('/conversations/:id/messages', checkPermission('chat', 'read'), getMessages);
 // chatUpload parses multipart/form-data (text + up to 10 image/video files).

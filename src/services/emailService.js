@@ -71,7 +71,7 @@ exports.verifyEmailConnection = async () => {
   }
 };
 
-exports.sendEmail = async ({ to, subject, html, text }) => {
+exports.sendEmail = async ({ to, subject, html, text, replyTo }) => {
   if (!to) return { sent: false, reason: 'no_recipient' };
 
   const settings = await Settings.findOne().lean();
@@ -88,6 +88,9 @@ exports.sendEmail = async ({ to, subject, html, text }) => {
     await mail.transporter.sendMail({
       from: mail.from || `"${company}" <noreply@crm.local>`,
       to,
+      // Lets HR/Admin simply hit "Reply" in their mail client to reach the
+      // employee who raised the request.
+      ...(replyTo ? { replyTo } : {}),
       subject,
       text: text || subject,
       html: html || `<p>${text || subject}</p>`,
