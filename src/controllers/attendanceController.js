@@ -60,6 +60,26 @@ function formatLongDate(dateInput) {
   });
 }
 
+// Email bodies are HTML, so every dynamic value (employee name, role, the
+// free-text reason a user types) has to be escaped. Without this a single "<"
+// in the reason breaks the markup, and unescaped text is an injection vector.
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Renders free text for an HTML table cell: escaped, with newlines kept as
+// line breaks so a multi-line reason stays readable in the mail client.
+function htmlTextBlock(value, fallback = '<em>Not specified</em>') {
+  const raw = String(value ?? '').trim();
+  if (!raw) return fallback;
+  return escapeHtml(raw).replace(/\r?\n/g, '<br>');
+}
+
 // Emails the employee the outcome of their leave request, including the
 // reviewer's rejection reason. Never throws - a mail failure must not break the
 // review itself.
@@ -76,6 +96,13 @@ async function sendLeaveReviewEmail({ leave, status, decisionLabel, reviewerLine
     const startLabel = formatLongDate(leave.startDate);
     const endLabel = formatLongDate(leave.endDate);
     const reviewedLabel = formatLongDate(new Date());
+
+    // HTML-safe variants for the markup below (the plain-text body keeps the
+    // raw values so it stays readable in any client).
+    const htmlRequesterName = escapeHtml(requester.name);
+    const htmlReviewerLine = escapeHtml(reviewerLine);
+    const htmlTypeLabel = escapeHtml(typeLabel);
+    const htmlStatusColor = escapeHtml(statusColor);
 
     const text = [
       '============================================================',
@@ -127,27 +154,27 @@ async function sendLeaveReviewEmail({ leave, status, decisionLabel, reviewerLine
             </head>
             <body>
               <div class="header">
-                <h1>Leave Request ${decisionLabel}</h1>
+                <h1>Leave Request ${escapeHtml(decisionLabel)}</h1>
               </div>
               <div class="content">
-                <p>Hello ${requester.name},</p>
-                <p>Your leave request has been <strong>${decisionLabel.toLowerCase()}</strong> by ${reviewerLine}.</p>
+                <p>Hello ${htmlRequesterName},</p>
+                <p>Your leave request has been <strong>${escapeHtml(decisionLabel.toLowerCase())}</strong> by ${htmlReviewerLine}.</p>
 
                 <table class="info-table">
-                  <tr><td>Leave Type</td><td><strong>${typeLabel}</strong></td></tr>
-                  <tr><td>Start Date</td><td>${startLabel}</td></tr>
-                  <tr><td>End Date</td><td>${endLabel}</td></tr>
-                  <tr><td>Total Days</td><td><strong>${leave.totalDays} day(s)</strong></td></tr>
-                  <tr><td>Status</td><td><strong style="color:${statusColor}">${decisionLabel.toUpperCase()}</strong></td></tr>
-                  <tr><td>Reviewed By</td><td>${reviewerLine}</td></tr>
-                  <tr><td>Reviewed On</td><td>${reviewedLabel}</td></tr>
+                  <tr><td>Leave Type</td><td><strong>${htmlTypeLabel}</strong></td></tr>
+                  <tr><td>Start Date</td><td>${escapeHtml(startLabel)}</td></tr>
+                  <tr><td>End Date</td><td>${escapeHtml(endLabel)}</td></tr>
+                  <tr><td>Total Days</td><td><strong>${escapeHtml(leave.totalDays)} day(s)</strong></td></tr>
+                  <tr><td>Status</td><td><strong style="color:${htmlStatusColor}">${escapeHtml(decisionLabel.toUpperCase())}</strong></td></tr>
+                  <tr><td>Reviewed By</td><td>${htmlReviewerLine}</td></tr>
+                  <tr><td>Reviewed On</td><td>${escapeHtml(reviewedLabel)}</td></tr>
                 </table>
 
-                <p><strong>${noteLabel}:</strong></p>
-                <div class="note">${plainNote}</div>
+                <p><strong>${escapeHtml(noteLabel)}:</strong></p>
+                <div class="note">${htmlTextBlock(plainNote)}</div>
               </div>
               <div class="footer">
-                <p>This is an automated notification from <strong>${company}</strong></p>
+                <p>This is an automated notification from <strong>${escapeHtml(company)}</strong></p>
                 <p>Please do not reply to this email.</p>
               </div>
             </body>
@@ -170,11 +197,127 @@ async function sendLeaveReviewEmail({ leave, status, decisionLabel, reviewerLine
         email: requester.email,
         sentAt: new Date(),
         delivered: !!result?.sent,
+        ...(result?.sent ? {} : { failureReason: result?.reason || 'unknown_error' }),
       },
     ];
     await leave.save();
   } catch (mailErr) {
     console.error('Leave review email failed:', mailErr.message);
+  }
+}
+
+// Confirms to the employee that their request was received, so they have a
+// record of what was submitted. Never throws - a mail failure must not break
+// the request itself.
+async function sendLeaveRequestConfirmationEmail({ requester, typeLabel, startLabel, endLabel, totalDays, reason }) {
+  try {
+    const settings = await Settings.findOne().lean();
+    const company = settings?.branding?.appName || settings?.companyName || 'CRM Pro';
+    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+    const text = [
+      '============================================================',
+      '        LEAVE REQUEST RECEIVED - PENDING APPROVAL',
+      '============================================================',
+      '',
+      `Employee:      ${requester.name} (${requester.role})`,
+      `Company:       ${company}`,
+      '',
+      '------------------------------------------------------------',
+      '                          DETAILS',
+      '------------------------------------------------------------',
+      '',
+      `Leave Type:    ${typeLabel}`,
+      `Start Date:    ${startLabel}`,
+      `End Date:      ${endLabel}`,
+      `Total Days:    ${totalDays} day(s)`,
+      'Status:        PENDING APPROVAL',
+      '',
+      'Reason:',
+      reason || 'Not specified',
+      '',
+      '------------------------------------------------------------',
+      '                     WHAT HAPPENS NEXT',
+      '------------------------------------------------------------',
+      '',
+      'Your request has been forwarded to HR / Admin for approval.',
+      'You will receive another email as soon as it is approved or rejected.',
+      `You can track the status here: ${frontendUrl}/attendance/leaves`,
+      '',
+      '============================================================',
+      `This is an automated notification from ${company}.`,
+      'Please do not reply to this email.',
+      '============================================================',
+    ].join('\n');
+
+    const html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; text-align: center; }
+                .header h1 { margin: 0; font-size: 22px; }
+                .content { background: #f9f9f9; padding: 25px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0; }
+                .info-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+                .info-table td { padding: 12px 15px; border-bottom: 1px solid #e0e0e0; }
+                .info-table td:first-child { font-weight: bold; width: 150px; color: #555; background: #f0f0f0; }
+                .status { display: inline-block; background: #dbeafe; color: #1d4ed8; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; }
+                .note { background: #fff; border-left: 4px solid #2563eb; padding: 12px 16px; margin-top: 10px; }
+                .footer { text-align: center; margin-top: 25px; padding-top: 15px; border-top: 1px solid #e0e0e0; color: #888; font-size: 12px; }
+                .link-btn { display: inline-block; background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; margin-top: 15px; }
+              </style>
+            </head>
+            <body>
+              <div class="header">
+                <h1>Leave Request Received</h1>
+                <p>Your request has been submitted</p>
+              </div>
+              <div class="content">
+                <p>Hello ${escapeHtml(requester.name)},</p>
+                <p>Your leave request has been recorded and forwarded to HR / Admin for approval.</p>
+
+                <table class="info-table">
+                  <tr><td>Leave Type</td><td><strong>${escapeHtml(typeLabel)}</strong></td></tr>
+                  <tr><td>Start Date</td><td>${escapeHtml(startLabel)}</td></tr>
+                  <tr><td>End Date</td><td>${escapeHtml(endLabel)}</td></tr>
+                  <tr><td>Total Days</td><td><strong>${escapeHtml(totalDays)} day(s)</strong></td></tr>
+                  <tr><td>Reason</td><td>${htmlTextBlock(reason)}</td></tr>
+                </table>
+
+                <div style="text-align: center;">
+                  <span class="status">&#128274; Pending Approval</span>
+                </div>
+
+                <div style="margin-top: 20px;">
+                  <p><strong>What happens next?</strong></p>
+                  <p style="margin-bottom: 0;">Your approver will review the request, and you will receive another
+                  email as soon as it is approved or rejected.</p>
+                </div>
+
+                <div style="text-align: center;">
+                  <a class="link-btn" href="${escapeHtml(frontendUrl)}/attendance/leaves">View My Leave Requests</a>
+                </div>
+              </div>
+              <div class="footer">
+                <p>This is an automated notification from <strong>${escapeHtml(company)}</strong></p>
+                <p>Please do not reply to this email.</p>
+              </div>
+            </body>
+            </html>
+          `;
+
+    return await sendEmail({
+      to: requester.email,
+      subject: `[${company}] Leave Request Received: ${typeLabel}`,
+      text,
+      html,
+    });
+  } catch (err) {
+    console.error('Leave request confirmation email failed:', err.message);
+    return { sent: false, reason: err.message };
   }
 }
 
@@ -239,6 +382,37 @@ async function notifyLateCheckInApprovers({ requester, record, lateMinutes }) {
     }))
   );
 }
+// ─── Leave request notifications ─────────────────────────────────────────────
+// Roles that can action a leave request. Mirrors the audience used for the
+// leave emails so in-app and email notifications reach the same people.
+const LEAVE_APPROVER_ROLES = ['super_admin', 'admin', 'hr'];
+
+// Tells every active approver that a leave request is waiting for them. The
+// requester is excluded so HR/Admin never queue a request for their own leave.
+// Email delivery is optional here (SMTP may not be configured) - the in-app
+// notification is the guaranteed channel, so it fires regardless of settings.
+async function notifyLeaveApprovers({ requester, leave, typeLabel, periodLabel, totalDays, reason }) {
+  const approvers = await User.find({
+    role: { $in: LEAVE_APPROVER_ROLES },
+    isActive: true,
+    _id: { $ne: requester._id },
+  }).select('_id');
+  if (!approvers.length) return;
+
+  await notifyMany(
+    approvers.map((approver) => ({
+      recipientId: approver._id,
+      senderId: requester._id,
+      type: 'leave_requested',
+      title: 'New leave request needs approval',
+      message:
+        `${requester.name} (${requester.role}) requested ${typeLabel} for ${periodLabel} (${totalDays} day(s)).` +
+        (reason ? ` Reason: ${reason}` : ''),
+      link: '/attendance/leaves',
+    }))
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function findTodayRecord(userId) {
@@ -771,6 +945,23 @@ exports.applyLeave = async (req, res) => {
       status: 'pending',
     });
 
+    // In-app notification for HR / Admin / Super Admin. Deliberately outside
+    // the notifyViaEmail block below: the bell notification must fire even when
+    // email is turned off or SMTP was never configured, otherwise a submitted
+    // leave is completely invisible to the people who have to approve it.
+    try {
+      await notifyLeaveApprovers({
+        requester: req.user,
+        leave,
+        typeLabel: leaveTypeLabel(normalizedLeaveType),
+        periodLabel: `${formatApprovalDate(start)} to ${formatApprovalDate(effectiveEnd)}`,
+        totalDays,
+        reason: String(reason || '').trim(),
+      });
+    } catch (notifyErr) {
+      console.error('Leave request notification failed:', notifyErr.message);
+    }
+
     // Send email notification to HR and Admin if requested
     let emailSentTo = [];
     if (notifyViaEmail) {
@@ -781,6 +972,9 @@ exports.applyLeave = async (req, res) => {
 
       const company = (await Settings.findOne().lean())?.branding?.appName || 'CRM Pro';
       const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+      const startLabel = formatLongDate(start);
+      const endLabel = formatLongDate(effectiveEnd);
+      const typeLabel = leaveTypeLabel(normalizedLeaveType);
       const emailPromises = hrAndAdminUsers.map(async (hrUser) => {
         const result = await sendEmail({
           to: hrUser.email,
@@ -799,9 +993,9 @@ Company: ${company}
                           DETAILS
 ------------------------------------------------------------
 
-Leave Type:    ${leaveTypeLabel(normalizedLeaveType)}
-Start Date:    ${start.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-End Date:      ${effectiveEnd.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+Leave Type:    ${typeLabel}
+Start Date:    ${startLabel}
+End Date:      ${endLabel}
 Total Days:    ${totalDays} day(s)
 Status:        PENDING APPROVAL
 
@@ -850,31 +1044,31 @@ Please review this leave request and take appropriate action.
                 <table class="info-table">
                   <tr>
                     <td>Employee Name</td>
-                    <td><strong>${req.user.name}</strong></td>
+                    <td><strong>${escapeHtml(req.user.name)}</strong></td>
                   </tr>
                   <tr>
                     <td>Employee Role</td>
-                    <td>${req.user.role}</td>
+                    <td>${escapeHtml(req.user.role)}</td>
                   </tr>
                   <tr>
                     <td>Leave Type</td>
-                    <td><strong>${leaveTypeLabel(normalizedLeaveType)}</strong></td>
+                    <td><strong>${escapeHtml(typeLabel)}</strong></td>
                   </tr>
                   <tr>
                     <td>Start Date</td>
-                    <td>${start.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td>
+                    <td>${escapeHtml(startLabel)}</td>
                   </tr>
                   <tr>
                     <td>End Date</td>
-                    <td>${effectiveEnd.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</td>
+                    <td>${escapeHtml(endLabel)}</td>
                   </tr>
                   <tr>
                     <td>Total Days</td>
-                    <td><strong>${totalDays} day(s)</strong></td>
+                    <td><strong>${escapeHtml(totalDays)} day(s)</strong></td>
                   </tr>
                   <tr>
                     <td>Reason</td>
-                    <td>${reason ? reason : '<em>Not specified</em>'}</td>
+                    <td>${htmlTextBlock(reason)}</td>
                   </tr>
                 </table>
                 
@@ -887,19 +1081,19 @@ Please review this leave request and take appropriate action.
                 </p>
 
                 <div style="text-align: center;">
-                  <a class="action-btn" href="${frontendUrl}/attendance">Open Attendance &amp; Review</a>
+                  <a class="action-btn" href="${escapeHtml(frontendUrl)}/attendance">Open Attendance &amp; Review</a>
                 </div>
                 <p style="margin-top: 10px; font-size: 12px; color: #888; text-align: center;">
                   Sign in as HR / Admin / Super Admin, then click the employee name under
                   &ldquo;Leave Requests&rdquo; to Approve or Reject this request.
                 </p>
                 <p style="margin-top: 4px; font-size: 12px; color: #888; text-align: center;">
-                  You can also simply reply to this email to reach ${req.user.name}
-                  (${req.user.email}) directly.
+                  You can also simply reply to this email to reach ${escapeHtml(req.user.name)}
+                  (${escapeHtml(req.user.email)}) directly.
                 </p>
               </div>
               <div class="footer">
-                <p>This is an automated notification from <strong>${company}</strong></p>
+                <p>This is an automated notification from <strong>${escapeHtml(company)}</strong></p>
                 <p>Please do not reply to this email.</p>
               </div>
             </body>
@@ -911,11 +1105,34 @@ Please review this leave request and take appropriate action.
           recipient: hrUser._id,
           email: hrUser.email,
           sentAt: new Date(),
-          delivered: result.sent,
+          delivered: !!result.sent,
+          // Kept so Admin/HR can see *why* a notification was not delivered
+          // (e.g. SMTP not configured) instead of just a false flag.
+          ...(result.sent ? {} : { failureReason: result.reason || 'unknown_error' }),
         };
       });
 
       emailSentTo = await Promise.all(emailPromises);
+
+      // Confirm to the employee that their request was received. This is sent
+      // regardless of whether the HR/Admin copies went out, so the requester
+      // always has a record of what they submitted.
+      const confirmResult = await sendLeaveRequestConfirmationEmail({
+        requester: req.user,
+        typeLabel,
+        startLabel,
+        endLabel,
+        totalDays,
+        reason,
+      });
+
+      emailSentTo.push({
+        recipient: req.user._id,
+        email: req.user.email,
+        sentAt: new Date(),
+        delivered: !!confirmResult?.sent,
+        ...(confirmResult?.sent ? {} : { failureReason: confirmResult?.reason || 'unknown_error' }),
+      });
 
       // Update the leave request with email notification records
       await LeaveRequest.findByIdAndUpdate(leave._id, {
@@ -928,11 +1145,26 @@ Please review this leave request and take appropriate action.
       .populate('reviewedBy', 'name email role')
       .populate('emailSentTo.recipient', 'name email role');
 
-    res.status(201).json({ 
-      success: true, 
+    // Only report addresses that actually accepted the message. Reporting the
+    // attempted recipients would tell the user "sent" while nothing was
+    // delivered (most commonly because SMTP is not configured).
+    const deliveredEmails = emailSentTo.filter((e) => e.delivered).map((e) => e.email);
+    const failedEmails = emailSentTo
+      .filter((e) => !e.delivered)
+      .map((e) => ({ email: e.email, reason: e.failureReason || 'unknown_error' }));
+
+    // "not_configured" / "disabled" mean no mail could leave the server at all,
+    // which the UI surfaces as a configuration warning rather than a failure.
+    const emailNotConfigured = failedEmails.length > 0 &&
+      failedEmails.every((f) => f.reason === 'not_configured' || f.reason === 'disabled');
+
+    res.status(201).json({
+      success: true,
       leave: populated,
-      emailSent: emailSentTo.length > 0,
-      emailsSentTo: emailSentTo.map(e => e.email),
+      emailSent: deliveredEmails.length > 0,
+      emailsSentTo: deliveredEmails,
+      failedEmails,
+      emailNotConfigured,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -943,6 +1175,7 @@ Please review this leave request and take appropriate action.
 // Cancel a pending leave request
 exports.cancelLeaveRequest = async (req, res) => {
   try {
+    const { reviewNote = '' } = req.body;
     const leave = await LeaveRequest.findById(req.params.id);
     if (!leave) {
       return res.status(404).json({ success: false, message: 'Leave request not found' });
@@ -950,7 +1183,7 @@ exports.cancelLeaveRequest = async (req, res) => {
 
     // Only the requester or admin/HR/super_admin can cancel
     const isRequester = String(leave.user) === String(req.user._id);
-    const isAdmin = ['admin', 'super_admin', 'hr'].includes(req.user.role);
+    const isAdmin = [...LEAVE_APPROVER_ROLES].includes(req.user.role);
 
     if (!isRequester && !isAdmin) {
       return res.status(403).json({ 
@@ -969,7 +1202,55 @@ exports.cancelLeaveRequest = async (req, res) => {
 
     // Update status to cancelled
     leave.status = 'cancelled';
+    leave.reviewNote = String(reviewNote || '').trim();
+    leave.reviewedBy = req.user._id;
+    leave.reviewedAt = new Date();
     await leave.save();
+
+    // Whoever ends up with an unwanted pending queue needs to know. When HR/Admin
+    // cancels, notify the employee (they are the one who loses the request);
+    // when the employee cancels, notify the approvers so they stop reviewing it.
+    const cancelledByRequester = isRequester;
+    const actorLine = `${req.user.name} (${req.user.role})`;
+    const periodLabel = `${formatApprovalDate(leave.startDate)} to ${formatApprovalDate(leave.endDate)}`;
+    const typeLabelForCancel = leaveTypeLabel(leave.leaveType);
+    const noteText = String(reviewNote || '').trim();
+
+    try {
+      if (cancelledByRequester) {
+        const approvers = await User.find({
+          role: { $in: LEAVE_APPROVER_ROLES },
+          isActive: true,
+          _id: { $ne: req.user._id },
+        }).select('_id');
+
+        await notifyMany(
+          approvers.map((approver) => ({
+            recipientId: approver._id,
+            senderId: req.user._id,
+            type: 'leave_cancelled',
+            title: 'Leave request withdrawn',
+            message:
+              `${req.user.name} (${req.user.role}) cancelled their pending ${typeLabelForCancel} request for ${periodLabel}.` +
+              (noteText ? ` Reason: ${noteText}` : ''),
+            link: '/attendance/leaves',
+          }))
+        );
+      } else {
+        await notifyUser({
+          recipientId: leave.user,
+          senderId: req.user._id,
+          type: 'leave_cancelled',
+          title: 'Leave request cancelled',
+          message:
+            `Your ${typeLabelForCancel} request for ${periodLabel} was cancelled by ${actorLine}.` +
+            (noteText ? ` Reason: ${noteText}` : ''),
+          link: '/attendance/leaves',
+        });
+      }
+    } catch (notifyErr) {
+      console.error('Leave cancellation notification failed:', notifyErr.message);
+    }
 
     const populated = await LeaveRequest.findById(leave._id)
       .populate('user', 'name email role department')
@@ -1115,10 +1396,19 @@ exports.reviewLeave = async (req, res) => {
     const noteText = String(reviewNote || '').trim();
 
     try {
+      // Map the decision to its own notification type so the employee sees the
+      // correct wording. Collapsing 'cancelled' into 'leave_rejected' would
+      // tell someone their request was rejected when HR merely withdrew it.
+      const reviewNotificationType = {
+        approved: 'leave_approved',
+        rejected: 'leave_rejected',
+        cancelled: 'leave_cancelled',
+      }[status] || 'leave_rejected';
+
       await notifyUser({
         recipientId: leave.user,
         senderId: req.user._id,
-        type: status === 'approved' ? 'leave_approved' : 'leave_rejected',
+        type: reviewNotificationType,
         title: `Leave request ${decisionLabel.toLowerCase()}`,
         message:
           `Your ${typeLabel} request for ${periodLabel} was ${decisionLabel.toLowerCase()} by ${reviewerLine}.` +
@@ -1145,6 +1435,65 @@ exports.reviewLeave = async (req, res) => {
       .populate('reviewedBy', 'name email role');
 
     res.json({ success: true, leave: populated });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// @GET /api/attendance/leaves/estimate
+// Live preview for the leave form. Uses the same policy rules as
+// calculateLeaveDayCount() (weekly offs, monthly offs, holidays) so the number
+// shown while the user fills the form is exactly the number the server stores.
+exports.estimateLeaveDays = async (req, res) => {
+  try {
+    const { startDate, endDate, leaveType = 'annual' } = req.query;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ success: false, message: 'startDate and endDate are required' });
+    }
+
+    const start = getDayBounds(startDate).start;
+    const end = getDayBounds(endDate).end;
+    if (end < start) {
+      return res.status(400).json({ success: false, message: 'End date cannot be before start date' });
+    }
+
+    // A half day always costs 0.5 - nothing to calculate.
+    if (isHalfDayLeaveType(leaveType)) {
+      return res.json({ success: true, calendarDays: 1, workingDays: 0.5, totalDays: 0.5, excludedDays: [] });
+    }
+
+    const policy = await getAttendancePolicy();
+    const days = enumerateDays(start, end);
+    const excludedDays = [];
+    let workingDays = 0;
+
+    for (const day of days) {
+      const key = toDateKey(day);
+      if (isWeeklyOff(day, policy)) {
+        excludedDays.push({ date: key, label: 'Weekly off' });
+        continue;
+      }
+      const monthlyOff = getMonthlyOffRuleForDate(day, policy);
+      if (monthlyOff) {
+        excludedDays.push({ date: key, label: monthlyOff.label || monthlyOff.name || 'Monthly off' });
+        continue;
+      }
+      const holiday = getHolidayForDate(day, policy);
+      if (holiday) {
+        excludedDays.push({ date: key, label: holiday.name || 'Holiday' });
+        continue;
+      }
+      workingDays += 1;
+    }
+
+    res.json({
+      success: true,
+      calendarDays: days.length,
+      workingDays,
+      // Mirrors the floor/ceiling applied by calculateLeaveDayCount().
+      totalDays: Math.max(0.5, workingDays || 1),
+      excludedDays,
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -1207,6 +1556,7 @@ exports.getLeaveRequestEmails = async (req, res) => {
         email: email.email,
         sentAt: email.sentAt,
         delivered: email.delivered,
+        failureReason: email.failureReason || '',
       })),
     }));
 

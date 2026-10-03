@@ -17,6 +17,10 @@ const emailAllowed = async (type) => {
     task_updated: 'taskAssigned',
     task_completed: 'taskAssigned',
     project_updated: 'taskAssigned',
+    leave_requested: 'leaveRequests',
+    leave_approved: 'leaveRequests',
+    leave_rejected: 'leaveRequests',
+    leave_cancelled: 'leaveRequests',
   };
   const key = map[type];
   return key ? settings.notifications[key] !== false : true;
@@ -90,5 +94,18 @@ exports.notifyUser = async ({
 };
 
 exports.notifyMany = async (items) => {
-  await Promise.all(items.map((item) => exports.notifyUser(item)));
+  // allSettled, not all: the in-app notification has already been persisted at
+  // this point, so a single failing recipient (e.g. an SMTP timeout) must not
+  // reject the batch and hide the other deliveries.
+  const results = await Promise.allSettled(
+    items.map((item) => exports.notifyUser(item))
+  );
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(
+        `Notification to ${items[index]?.recipientId} failed:`,
+        result.reason?.message
+      );
+    }
+  });
 };

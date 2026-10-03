@@ -38,18 +38,32 @@ const server = http.createServer(app);
 // Disabling ETag avoids browser revalidation returning 304 without JSON.
 app.disable('etag');
 
-const corsOrigins = process.env.CORS_ORIGIN
-  ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
-  : ['http://localhost:3000', 'http://127.0.0.1:3000'];
+// ─── CORS ────────────────────────────────────────────────────────────────────
+// Allowed browser origins come ONLY from the CORS_ORIGIN env var (comma
+// separated, trimmed, empty entries dropped, duplicates removed). There are
+// no hardcoded origins and no NODE_ENV-based bypass — every environment
+// (production, staging, local) must set CORS_ORIGIN itself. Requests without
+// an Origin header (curl, Postman, same-origin navigations, server-to-server
+// calls) are always allowed.
+const corsOrigins = Array.from(
+  new Set(
+    (process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean)
+  )
+);
 
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin || corsOrigins.includes(origin)) return callback(null, true);
-      if (process.env.NODE_ENV === 'development') return callback(null, true);
       return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
+    // Cache CORS preflight results for 24h in the browser so cross-origin
+    // PUT/POST/multipart calls don't re-send an OPTIONS request every time.
+    maxAge: 86400,
   })
 );
 
@@ -64,8 +78,14 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
-// Static uploads
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Static uploads — served WITHOUT authentication (the browser loads these
+// via plain <img>/media requests that carry no Authorization header), so a
+// public 1-day browser cache is safe and stops re-downloading avatars and
+// chat attachments on every visit. send() emits `public, max-age=86400`.
+app.use(
+  '/uploads',
+  express.static(path.join(__dirname, 'uploads'), { maxAge: '1d' })
+);
 
 // Routes
 app.use('/api/auth', authRoutes);

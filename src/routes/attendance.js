@@ -12,9 +12,10 @@ const {
   reviewLateCheckIn,
   getLeaveRequests,
   applyLeave,
-    reviewLeave,
+  reviewLeave,
   cancelLeaveRequest,
   reconcileAttendance,
+  estimateLeaveDays,
   getLeaveRequestEmails,
 } = require('../controllers/attendanceController');
 const { protect, checkPermission, enforceOrganizationModule } = require('../middleware/auth');
@@ -34,9 +35,10 @@ router.get('/late-checkins', checkPermission('attendance', 'read'), getLateCheck
 router.put('/late-checkins/:id/review', checkPermission('attendance', 'approve'), reviewLateCheckIn);
 
 router.get('/leaves', checkPermission('leave', 'read'), getLeaveRequests);
+router.get('/leaves/estimate', checkPermission('leave', 'create'), estimateLeaveDays);
+router.get('/leaves/emails', checkPermission('leave', 'read'), getLeaveRequestEmails);
 router.post('/leaves', checkPermission('leave', 'create'), applyLeave);
 router.put('/leaves/:id/review', checkPermission('leave', 'approve'), reviewLeave);
 router.put('/leaves/:id/cancel', checkPermission('leave', 'update'), cancelLeaveRequest);
-router.get('/leaves/emails', checkPermission('leave', 'read'), getLeaveRequestEmails);
 
 module.exports = router;

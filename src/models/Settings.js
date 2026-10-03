@@ -140,6 +140,8 @@ const settingsSchema = new mongoose.Schema(
       deadlineReminders: { type: Boolean, default: true },
       taskAssigned: { type: Boolean, default: true },
       mentionAlerts: { type: Boolean, default: true },
+      // Leave workflow emails (new request / approved / rejected / cancelled).
+      leaveRequests: { type: Boolean, default: true },
     },
     smtp: { type: smtpSchema, default: () => ({}) },
     integrations: {

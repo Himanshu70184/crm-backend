@@ -17,6 +17,14 @@ const notificationSchema = new mongoose.Schema(
         'late_checkin_pending',
         'late_checkin_approved',
         'late_checkin_rejected',
+        // Leave workflow. These MUST stay in sync with the types the leave
+        // controller passes to notifyUser() - an unknown value fails Mongoose
+        // enum validation, which is silently swallowed and results in the
+        // recipient never seeing the notification.
+        'leave_requested',
+        'leave_approved',
+        'leave_rejected',
+        'leave_cancelled',
       ],
       required: true,
     },

@@ -18,10 +18,13 @@ function resolveSocketToken(socket) {
   return normalizeToken(authToken || headerToken || '');
 }
 
+// Mirrors the Express CORS guard: allow requests without an Origin header
+// (non-browser clients / same-origin) and origins present in the list that
+// server.js derived from CORS_ORIGIN. No development bypass — the origin
+// list itself is the single source of truth in every environment.
 function buildCorsOriginGuard(corsOrigins = []) {
   return (origin, callback) => {
     if (!origin || corsOrigins.includes(origin)) return callback(null, true);
-    if (process.env.NODE_ENV === 'development') return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   };
 }

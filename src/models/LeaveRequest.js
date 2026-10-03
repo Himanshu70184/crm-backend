@@ -40,6 +40,9 @@ const leaveRequestSchema = new mongoose.Schema(
         email: { type: String },
         sentAt: { type: Date, default: Date.now },
         delivered: { type: Boolean, default: true },
+        // Why a notification was not delivered ('not_configured', 'disabled',
+        // or the SMTP error message). Absent when delivered successfully.
+        failureReason: { type: String, default: '' },
       }],
       default: [],
     },
