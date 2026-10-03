@@ -98,6 +98,29 @@ exports.createTask = async (req, res) => {
     }
 
     const projectId = body.project;
+    // Who may create tasks:
+    // - Clients can never create tasks.
+    // - super_admin/admin/manager keep creating tasks in any project (matches
+    //   the project routes, which let managers manage every project).
+    // - Everyone else (team_member, member, team_lead, hr ...) may only
+    //   create tasks inside a project they own or are assigned to, so the
+    //   person assigned the work can break it down into tasks/subtasks.
+    if (req.user.role === 'client') {
+      return res.status(403).json({ success: false, message: 'Clients cannot create tasks' });
+    }
+    const elevatedCreator = ['super_admin', 'admin', 'manager'].includes(req.user.role);
+    if (projectId && !elevatedCreator) {
+      const project = await Project.findById(projectId).select('_id owner team');
+      if (!project) {
+        return res.status(404).json({ success: false, message: 'Project not found' });
+      }
+      const userId = req.user._id.toString();
+      const isOwner = project.owner?.toString() === userId;
+      const isOnTeam = (project.team || []).some((m) => m.toString() === userId);
+      if (!isOwner && !isOnTeam) {
+        return res.status(403).json({ success: false, message: 'You are not assigned to this project' });
+      }
+    }
     const activeColumns = await getActiveColumns(projectId);
     const fallback = activeColumns[0]?.id || 'todo';
     if (body.status) {
